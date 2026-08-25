@@ -3,7 +3,7 @@ spec:
   services:
   - name: itglue-mcp
     github:
-      repo: wyre-technology/itglue-mcp
+      repo: WYRE-AI/itglue-mcp
       branch: main
       deploy_on_push: true
     source_dir: /

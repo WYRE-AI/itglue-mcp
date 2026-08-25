@@ -5,9 +5,9 @@
   "version": "0.0.0",
   "description": "MCP server for IT Glue - access organizations, configurations, passwords, and documents through AI assistants",
   "long_description": "Provides AI assistants with structured access to your IT Glue documentation platform. Browse organizations, configurations, flexible assets, passwords, and documents through the Model Context Protocol.",
-  "author": { "name": "Wyre Technology", "url": "https://github.com/wyre-technology" },
-  "repository": { "type": "git", "url": "https://github.com/wyre-technology/itglue-mcp" },
-  "homepage": "https://github.com/wyre-technology/itglue-mcp",
+  "author": { "name": "Wyre Technology", "url": "https://github.com/WYRE-AI" },
+  "repository": { "type": "git", "url": "https://github.com/WYRE-AI/itglue-mcp" },
+  "homepage": "https://github.com/WYRE-AI/itglue-mcp",
   "license": "Apache-2.0",
   "keywords": ["itglue", "documentation", "msp", "kaseya", "it-management"],
   "server": {

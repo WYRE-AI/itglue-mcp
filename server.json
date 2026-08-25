@@ -1,18 +1,18 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.wyre-technology/itglue-mcp",
+  "name": "io.github.WYRE-AI/itglue-mcp",
   "title": "IT Glue",
   "description": "MCP server for IT Glue — organizations, configurations, passwords, flexible assets, and documents.",
   "repository": {
-    "url": "https://github.com/wyre-technology/itglue-mcp",
+    "url": "https://github.com/WYRE-AI/itglue-mcp",
     "source": "github"
   },
   "version": "0.0.0",
-  "websiteUrl": "https://github.com/wyre-technology/itglue-mcp",
+  "websiteUrl": "https://github.com/WYRE-AI/itglue-mcp",
   "packages": [
     {
       "registryType": "oci",
-      "identifier": "ghcr.io/wyre-technology/itglue-mcp:0.0.0",
+      "identifier": "ghcr.io/wyre-ai/itglue-mcp:0.0.0",
       "transport": {
         "type": "stdio"
       },

@@ -1,5 +1,5 @@
 {
-  "name": "@wyre-technology/itglue-mcp",
+  "name": "@wyre-ai/itglue-mcp",
   "version": "1.5.3",
   "description": "IT Glue MCP server for Claude",
   "type": "module",
@@ -22,7 +22,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/wyre-technology/itglue-mcp.git"
+    "url": "git+https://github.com/WYRE-AI/itglue-mcp.git"
   },
   "keywords": [
     "mcp",
@@ -35,9 +35,9 @@
   "author": "Wyre Technology",
   "license": "Apache-2.0",
   "bugs": {
-    "url": "https://github.com/wyre-technology/itglue-mcp/issues"
+    "url": "https://github.com/WYRE-AI/itglue-mcp/issues"
   },
-  "homepage": "https://github.com/wyre-technology/itglue-mcp#readme",
+  "homepage": "https://github.com/WYRE-AI/itglue-mcp#readme",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0"
   },

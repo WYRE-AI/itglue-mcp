@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
       target: production
-    image: ghcr.io/wyre-technology/itglue-mcp:latest
+    image: ghcr.io/wyre-ai/itglue-mcp:latest
     container_name: itglue-mcp-server
     restart: unless-stopped
     ports:

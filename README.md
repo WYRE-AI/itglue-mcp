@@ -4,20 +4,20 @@ A Model Context Protocol (MCP) server that provides Claude with access to IT Glu
 
 ## One-Click Deployment
 
-[![Deploy to DO](https://www.deploytodo.com/do-btn-blue.svg)](https://cloud.digitalocean.com/apps/new?repo=https://github.com/wyre-technology/itglue-mcp/tree/main)
+[![Deploy to DO](https://www.deploytodo.com/do-btn-blue.svg)](https://cloud.digitalocean.com/apps/new?repo=https://github.com/WYRE-AI/itglue-mcp/tree/main)
 
-[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/wyre-technology/itglue-mcp)
+[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/WYRE-AI/itglue-mcp)
 
 > [!NOTE]
 > Unlike the other Wyre MCP servers, this one talks to the IT Glue API directly and
-> has **no private `@wyre-technology/*` runtime dependency**, so the one-click build
+> has **no private `@wyre-ai/*` runtime dependency**, so the one-click build
 > does not need a GitHub Packages token — the cloud builder's `npm ci` only pulls
 > public packages. (A `read:packages` token is only needed to install the published
-> `@wyre-technology/itglue-mcp` package itself; see [Installation](#installation).)
+> `@wyre-ai/itglue-mcp` package itself; see [Installation](#installation).)
 > The DigitalOcean target builds the full Docker image and runs the complete MCP
 > server over HTTP and is the recommended path; this repo does not ship a Workers
 > entrypoint (`src/worker.ts`), so prefer DigitalOcean or the prebuilt container
-> image (`ghcr.io/wyre-technology/itglue-mcp`).
+> image (`ghcr.io/wyre-ai/itglue-mcp`).
 
 ## Installation
 
@@ -28,17 +28,17 @@ token even for public packages. Authenticate npm once, then install:
 # Authenticate npm to GitHub Packages (token needs the read:packages scope)
 export NODE_AUTH_TOKEN=$(gh auth token)   # or a PAT with read:packages
 
-npm install @wyre-technology/itglue-mcp
+npm install @wyre-ai/itglue-mcp
 ```
 
-The repo's `.npmrc` already points the `@wyre-technology` scope at GitHub Packages and
+The repo's `.npmrc` already points the `@wyre-ai` scope at GitHub Packages and
 reads the token from `NODE_AUTH_TOKEN`, so no further config is needed. The same applies
-to `npx @wyre-technology/itglue-mcp`.
+to `npx @wyre-ai/itglue-mcp`.
 
 Or use the Docker image:
 
 ```bash
-docker pull ghcr.io/wyre-technology/itglue-mcp:latest
+docker pull ghcr.io/wyre-ai/itglue-mcp:latest
 ```
 
 ## Configuration
@@ -157,7 +157,7 @@ Add to your `.mcp.json`:
   "mcpServers": {
     "itglue": {
       "command": "npx",
-      "args": ["@wyre-technology/itglue-mcp"],
+      "args": ["@wyre-ai/itglue-mcp"],
       "env": {
         "ITGLUE_API_KEY": "${ITGLUE_API_KEY}",
         "ITGLUE_REGION": "us"
@@ -178,7 +178,7 @@ Or with Docker (local stdio):
         "run", "--rm", "-i",
         "-e", "MCP_TRANSPORT=stdio",
         "-e", "ITGLUE_API_KEY",
-        "ghcr.io/wyre-technology/itglue-mcp:latest"
+        "ghcr.io/wyre-ai/itglue-mcp:latest"
       ],
       "env": {
         "ITGLUE_API_KEY": "${ITGLUE_API_KEY}"
@@ -208,7 +208,7 @@ docker run -d \
   -e ITGLUE_API_KEY="ITG.xxxxxxxx" \
   -e ITGLUE_REGION="us" \
   --restart unless-stopped \
-  ghcr.io/wyre-technology/itglue-mcp:latest
+  ghcr.io/wyre-ai/itglue-mcp:latest
 
 # Verify
 curl http://localhost:8080/health
@@ -227,7 +227,7 @@ docker run -d \
   -p 8080:8080 \
   -e AUTH_MODE=gateway \
   --restart unless-stopped \
-  ghcr.io/wyre-technology/itglue-mcp:latest
+  ghcr.io/wyre-ai/itglue-mcp:latest
 ```
 
 The gateway supplies credentials on each request via these headers:
@@ -247,7 +247,7 @@ The same transport works from an installed/built copy by setting `MCP_TRANSPORT=
 
 ```bash
 MCP_TRANSPORT=http MCP_HTTP_PORT=8080 ITGLUE_API_KEY="ITG.xxxxxxxx" \
-  npx @wyre-technology/itglue-mcp
+  npx @wyre-ai/itglue-mcp
 ```
 
 ## Example Queries
