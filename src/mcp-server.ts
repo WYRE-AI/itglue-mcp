@@ -612,6 +612,22 @@ export function folderedDocumentsIncludedNote(): string {
 }
 
 /**
+ * Drop one top-level field from every resource in a list result.
+ *
+ * `deserializeResource` flattens `attributes` and camelCases the keys, so the
+ * fields these list tools want to withhold sit at the top level of each record.
+ */
+function omitResourceField(items: unknown[], field: string): unknown[] {
+  return items.map((item) => {
+    if (item && typeof item === "object" && field in item) {
+      const { [field]: _omitted, ...rest } = item as Record<string, unknown>;
+      return rest;
+    }
+    return item;
+  });
+}
+
+/**
  * Strip each document's full body from a `search_documents` listing.
  *
  * IT Glue's documents list endpoint embeds every document's full sectioned body
@@ -623,17 +639,25 @@ export function folderedDocumentsIncludedNote(): string {
  * retrieval stays with get_document / list_document_sections.
  *
  * Coupled to IT Glue's current field name: the body arrives as a top-level
- * `content` key (deserializeResource flattens `attributes` and camelCases keys).
- * If IT Glue renames the body field or adds another heavy one, revisit this.
+ * `content` key. If IT Glue renames the body field or adds another heavy one,
+ * revisit this.
  */
 export function stripDocumentBodies(docs: unknown[]): unknown[] {
-  return docs.map((doc) => {
-    if (doc && typeof doc === "object" && "content" in doc) {
-      const { content: _body, ...rest } = doc as Record<string, unknown>;
-      return rest;
-    }
-    return doc;
-  });
+  return omitResourceField(docs, "content");
+}
+
+/**
+ * Remove secret material from a `search_passwords` listing.
+ *
+ * `search_passwords` asks IT Glue not to send secrets (`show_password=false`),
+ * but that is a request, not a guarantee: it is one query parameter away from
+ * being dropped by a refactor, and a tenant or API version that ignores it would
+ * spill every matched secret into the model's context in a single bulk listing.
+ * Reading a secret is `get_password`'s job — one id at a time, deliberately — so
+ * the list tool strips the value on the way out regardless of what came back.
+ */
+export function stripPasswordValues(passwords: unknown[]): unknown[] {
+  return omitResourceField(passwords, "password");
 }
 
 /** Advisory that document bodies are omitted from `search_documents` results. */
@@ -643,6 +667,63 @@ export function documentBodyOmittedNote(): string {
     "item is metadata only. Call get_document (or list_document_sections) to read a specific " +
     "document's content."
   );
+}
+
+/**
+ * Warning attached to a `search_*` result that ran WITHOUT an organization
+ * filter.
+ *
+ * These tools try to scope themselves by eliciting an organization name when
+ * `organization_id` is omitted. That can fail to produce a scope in several
+ * ways: elicitation is unavailable on any client that doesn't support it
+ * — notably through the MCP gateway, which does not proxy server-initiated
+ * requests — the user can decline, and the name they give can match no
+ * organization at all. Every one of those paths silently widened the search to
+ * the whole account. A caller that asked for "the VPN password for Acme" then
+ * received an arbitrary page drawn from every organization and reasonably
+ * concluded the entry did not exist.
+ *
+ * The query still runs (organization_id is genuinely optional — an account-wide
+ * search is a legitimate request). What changes is that the result now says
+ * which search actually happened, so an unscoped miss can't be read as proof of
+ * absence. The wording deliberately does not blame a particular cause: the
+ * handler can't tell "could not ask" from "asked, and nothing matched", and
+ * naming the wrong one sends the reader after the wrong fix.
+ */
+export function unscopedSearchNote(
+  resource: string,
+  meta: PaginationMeta
+): string {
+  return (
+    `NOTE: this search was NOT scoped to an organization — no organization_id was ` +
+    `supplied and one could not be determined, ` +
+    `so it searched ${resource} across ALL organizations — returning page ${meta.currentPage} ` +
+    `of ${meta.totalPages} (${meta.totalCount} matching entries account-wide). ` +
+    `An empty or unexpected result here does NOT mean the entry is absent. ` +
+    `To scope the search, call search_organizations to find the organization's id, ` +
+    `then re-run this tool with organization_id set.`
+  );
+}
+
+/**
+ * The unscoped-search warning, emitted only when no organization filter
+ * actually went out on the wire.
+ *
+ * Deliberately keyed off the built filter rather than the caller's raw
+ * `organization_id`. The handlers apply the filter under `if (orgId)` but the
+ * warning used to be gated on `orgId === undefined`, so a falsy-but-present id
+ * (`0`, or the `NaN` from `Number(<non-numeric id>)` after an elicited lookup)
+ * fell through the gap: the scope was dropped AND the warning suppressed. One
+ * helper reading the filter keeps the two from drifting apart again.
+ */
+function unscopedSearchNoteFor(
+  resource: string,
+  filter: Record<string, unknown>,
+  meta: PaginationMeta
+): string {
+  return filter.organizationId === undefined
+    ? unscopedSearchNote(resource, meta)
+    : "";
 }
 
 /** Which filter form ultimately produced a `search_documents` listing. */
@@ -1788,13 +1869,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
 
         const result = await client.request("/configurations", params);
+        const configText = [
+          unscopedSearchNoteFor("configurations", filter, result.meta),
+          JSON.stringify(result, null, 2),
+        ]
+          .filter(Boolean)
+          .join("\n\n");
         return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(result, null, 2),
-            },
-          ],
+          content: [{ type: "text", text: configText }],
         };
       }
 
@@ -1867,13 +1949,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
 
         const result = await client.request("/locations", params);
+        const locText = [
+          unscopedSearchNoteFor("locations", filter, result.meta),
+          JSON.stringify(result, null, 2),
+        ]
+          .filter(Boolean)
+          .join("\n\n");
         return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(result, null, 2),
-            },
-          ],
+          content: [{ type: "text", text: locText }],
         };
       }
 
@@ -2009,13 +2092,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         params.show_password = false;
 
         const result = await client.request("/passwords", params);
+        const redacted = {
+          ...result,
+          data: stripPasswordValues(result.data as unknown[]),
+        };
+        const pwText = [
+          unscopedSearchNoteFor("passwords", filter, result.meta),
+          JSON.stringify(redacted, null, 2),
+        ]
+          .filter(Boolean)
+          .join("\n\n");
         return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(result, null, 2),
-            },
-          ],
+          content: [{ type: "text", text: pwText }],
         };
       }
 

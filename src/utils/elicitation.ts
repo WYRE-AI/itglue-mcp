@@ -10,6 +10,27 @@ export interface ElicitOption {
 }
 
 /**
+ * Record that an elicitation prompt could not be delivered.
+ *
+ * Failing here is expected, not exceptional: any client that doesn't declare
+ * the elicitation capability makes `elicitInput()` throw, and the MCP gateway
+ * does not proxy server-initiated requests at all — so every gateway-mode
+ * request takes this path. Returning null and degrading is therefore correct.
+ *
+ * What was wrong was doing it *silently*: a bare `catch {}` turned "the user
+ * could not be asked" into "the user said nothing", callers widened their
+ * query, and nothing anywhere recorded that a prompt had been dropped. Logged
+ * to stderr because stdout is the stdio transport's protocol channel.
+ */
+function noteElicitationUnavailable(reason: unknown): void {
+  const detail = reason instanceof Error ? reason.message : String(reason);
+  console.error(
+    `[itglue-mcp] elicitation unavailable (${detail}) — continuing without user input; ` +
+      `callers fall back to an unscoped request.`
+  );
+}
+
+/**
  * Ask the user to select from a list of options.
  */
 export async function elicitSelection(
@@ -18,7 +39,10 @@ export async function elicitSelection(
   options: ElicitOption[]
 ): Promise<string | null> {
   const server = getServerRef();
-  if (!server) return null;
+  if (!server) {
+    noteElicitationUnavailable("no server bound to this request context");
+    return null;
+  }
 
   try {
     const result = await server.elicitInput({
@@ -42,7 +66,8 @@ export async function elicitSelection(
       return result.content[fieldName] as string;
     }
     return null;
-  } catch {
+  } catch (err) {
+    noteElicitationUnavailable(err);
     return null;
   }
 }
@@ -56,7 +81,10 @@ export async function elicitText(
   description?: string
 ): Promise<string | null> {
   const server = getServerRef();
-  if (!server) return null;
+  if (!server) {
+    noteElicitationUnavailable("no server bound to this request context");
+    return null;
+  }
 
   try {
     const result = await server.elicitInput({
@@ -78,7 +106,8 @@ export async function elicitText(
       return result.content[fieldName] as string;
     }
     return null;
-  } catch {
+  } catch (err) {
+    noteElicitationUnavailable(err);
     return null;
   }
 }
@@ -90,7 +119,10 @@ export async function elicitConfirmation(
   message: string
 ): Promise<boolean | null> {
   const server = getServerRef();
-  if (!server) return null;
+  if (!server) {
+    noteElicitationUnavailable("no server bound to this request context");
+    return null;
+  }
 
   try {
     const result = await server.elicitInput({
@@ -112,7 +144,8 @@ export async function elicitConfirmation(
       return result.content.confirm as boolean;
     }
     return null;
-  } catch {
+  } catch (err) {
+    noteElicitationUnavailable(err);
     return null;
   }
 }

@@ -34,6 +34,7 @@ import {
   requestDocumentsWithFolderDefault,
   rootLevelDocumentsNote,
   stripDocumentBodies,
+  stripPasswordValues,
 } from "../index.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -274,42 +275,40 @@ describe("ITGlueClient", () => {
   });
 
   describe("Request Headers", () => {
-    it("should include correct headers in request", async () => {
-      let capturedHeaders: Record<string, string> = {};
+    // Asserts on what ITGlueClient.authHeaders() actually put on the wire.
+    // The previous version of this test hand-built a headers object, handed it
+    // to the fetch mock itself, and asserted the mock had received it — it
+    // never touched the client and could not fail.
+    it("sends the API key and the JSON:API content negotiation headers", async () => {
+      mockFetch.mockImplementation(() =>
+        createMockResponse(createJsonApiResponse([]))
+      );
 
-      mockFetch.mockImplementation((_url: string, options: RequestInit) => {
-        capturedHeaders = options.headers as Record<string, string>;
-        return createMockResponse(createJsonApiResponse([]));
-      });
+      const client = new ITGlueClient({ apiKey: "test-api-key", region: "us" });
+      await client.request("/organizations");
 
-      // Simulate the header setup
-      const headers = {
-        "x-api-key": "test-api-key",
-        "Content-Type": "application/vnd.api+json",
-        Accept: "application/vnd.api+json",
-      };
-
-      await fetch("https://api.itglue.com/organizations", {
-        method: "GET",
-        headers,
-      });
-
-      expect(capturedHeaders["x-api-key"]).toBe("test-api-key");
-      expect(capturedHeaders["Content-Type"]).toBe("application/vnd.api+json");
-      expect(capturedHeaders["Accept"]).toBe("application/vnd.api+json");
+      const headers = (mockFetch.mock.calls[0][1] as RequestInit)
+        .headers as Record<string, string>;
+      expect(headers["x-api-key"]).toBe("test-api-key");
+      expect(headers["Content-Type"]).toBe("application/vnd.api+json");
+      expect(headers["Accept"]).toBe("application/vnd.api+json");
     });
   });
 
   describe("Error Handling", () => {
-    it("should handle non-OK HTTP responses", async () => {
+    it("turns a non-OK HTTP response into a thrown error carrying the status", async () => {
       mockFetch.mockResolvedValueOnce(createErrorResponse(401, "Unauthorized"));
 
-      const response = await fetch("https://api.itglue.com/organizations");
-      expect(response.ok).toBe(false);
-      expect(response.status).toBe(401);
+      const client = new ITGlueClient({ apiKey: "test-api-key", region: "us" });
+      await expect(client.request("/organizations")).rejects.toThrow(
+        /IT Glue API error \(401\).*Unauthorized/
+      );
     });
 
-    it("should handle JSON:API error responses", async () => {
+    it("throws on a 200 response that carries a JSON:API errors array", async () => {
+      // IT Glue can answer 200 OK with an `errors` member; treating that as a
+      // successful empty result would report "no such organization" for what is
+      // really a server-side failure.
       const errorBody: JsonApiResponse = {
         data: [],
         errors: [
@@ -318,16 +317,19 @@ describe("ITGlueClient", () => {
       };
       mockFetch.mockResolvedValueOnce(createMockResponse(errorBody));
 
-      const response = await fetch("https://api.itglue.com/organizations/999999");
-      const json = (await response.json()) as JsonApiResponse;
-      expect(json.errors).toBeDefined();
-      expect(json.errors![0].detail).toBe("Organization not found");
+      const client = new ITGlueClient({ apiKey: "test-api-key", region: "us" });
+      await expect(client.request("/organizations/999999")).rejects.toThrow(
+        "IT Glue API error: Organization not found"
+      );
     });
 
-    it("should handle network errors", async () => {
+    it("propagates transport-level failures unchanged", async () => {
       mockFetch.mockRejectedValueOnce(new Error("Network error"));
 
-      await expect(fetch("https://api.itglue.com/organizations")).rejects.toThrow("Network error");
+      const client = new ITGlueClient({ apiKey: "test-api-key", region: "us" });
+      await expect(client.request("/organizations")).rejects.toThrow(
+        "Network error"
+      );
     });
   });
 });
@@ -509,312 +511,12 @@ describe("Tool Handler Integration", () => {
     process.env = originalEnv;
   });
 
-  describe("search_organizations", () => {
-    it("should search organizations without filters", async () => {
-      const mockData = createJsonApiResponse([
-        { id: "1", type: "organizations", attributes: { name: "Acme Corp", "short-name": "ACME" } },
-        { id: "2", type: "organizations", attributes: { name: "Beta Inc", "short-name": "BETA" } },
-      ]);
-
-      mockFetch.mockResolvedValueOnce(createMockResponse(mockData));
-
-      const response = await fetch("https://api.itglue.com/organizations?page[size]=50&page[number]=1");
-      const json = (await response.json()) as JsonApiResponse;
-
-      expect(Array.isArray(json.data)).toBe(true);
-      expect((json.data as JsonApiResource[]).length).toBe(2);
-      expect((json.data as JsonApiResource[])[0].attributes?.name).toBe("Acme Corp");
-    });
-
-    it("should search organizations with name filter", async () => {
-      const mockData = createJsonApiResponse([
-        { id: "1", type: "organizations", attributes: { name: "Acme Corp" } },
-      ]);
-
-      mockFetch.mockResolvedValueOnce(createMockResponse(mockData));
-
-      const response = await fetch("https://api.itglue.com/organizations?filter[name]=Acme");
-      const json = (await response.json()) as JsonApiResponse;
-
-      expect((json.data as JsonApiResource[]).length).toBe(1);
-      expect((json.data as JsonApiResource[])[0].attributes?.name).toBe("Acme Corp");
-    });
-
-    it("should search organizations with pagination", async () => {
-      const mockData = createJsonApiResponse(
-        [{ id: "1", type: "organizations", attributes: { name: "Test" } }],
-        {
-          "current-page": 2,
-          "next-page": 3,
-          "prev-page": 1,
-          "total-pages": 5,
-          "total-count": 100,
-        }
-      );
-
-      mockFetch.mockResolvedValueOnce(createMockResponse(mockData));
-
-      const response = await fetch("https://api.itglue.com/organizations?page[number]=2");
-      const json = (await response.json()) as JsonApiResponse;
-
-      expect(json.meta?.["current-page"]).toBe(2);
-      expect(json.meta?.["total-count"]).toBe(100);
-    });
-
-    it("should search organizations with sort", async () => {
-      const mockData = createJsonApiResponse([
-        { id: "2", type: "organizations", attributes: { name: "Beta Inc" } },
-        { id: "1", type: "organizations", attributes: { name: "Acme Corp" } },
-      ]);
-
-      mockFetch.mockResolvedValueOnce(createMockResponse(mockData));
-
-      const response = await fetch("https://api.itglue.com/organizations?sort=-name");
-      const json = (await response.json()) as JsonApiResponse;
-
-      expect((json.data as JsonApiResource[])[0].attributes?.name).toBe("Beta Inc");
-    });
-  });
-
-  describe("get_organization", () => {
-    it("should get a single organization by ID", async () => {
-      const mockData: JsonApiResponse = {
-        data: {
-          id: "12345",
-          type: "organizations",
-          attributes: {
-            name: "Acme Corp",
-            "short-name": "ACME",
-            description: "A test organization",
-            "created-at": "2024-01-01T00:00:00Z",
-            "updated-at": "2024-01-02T00:00:00Z",
-          },
-        },
-      };
-
-      mockFetch.mockResolvedValueOnce(createMockResponse(mockData));
-
-      const response = await fetch("https://api.itglue.com/organizations/12345");
-      const json = (await response.json()) as JsonApiResponse;
-
-      expect((json.data as JsonApiResource).id).toBe("12345");
-      expect((json.data as JsonApiResource).attributes?.name).toBe("Acme Corp");
-    });
-
-    it("should return error when ID is missing", () => {
-      const args: Record<string, string> = {};
-      const hasId = "id" in args && args.id;
-
-      expect(hasId).toBeFalsy();
-    });
-
-    it("should handle organization not found", async () => {
-      mockFetch.mockResolvedValueOnce(createErrorResponse(404, "Not Found"));
-
-      const response = await fetch("https://api.itglue.com/organizations/999999");
-      expect(response.ok).toBe(false);
-      expect(response.status).toBe(404);
-    });
-  });
-
-  describe("search_configurations", () => {
-    it("should search configurations with organization filter", async () => {
-      const mockData = createJsonApiResponse([
-        {
-          id: "1",
-          type: "configurations",
-          attributes: {
-            name: "Server-01",
-            "configuration-type-name": "Server",
-            "serial-number": "SN12345",
-          },
-        },
-      ]);
-
-      mockFetch.mockResolvedValueOnce(createMockResponse(mockData));
-
-      const response = await fetch("https://api.itglue.com/configurations?filter[organization-id]=123");
-      const json = (await response.json()) as JsonApiResponse;
-
-      expect((json.data as JsonApiResource[])[0].attributes?.name).toBe("Server-01");
-      expect((json.data as JsonApiResource[])[0].attributes?.["serial-number"]).toBe("SN12345");
-    });
-
-    it("should search configurations with multiple filters", async () => {
-      const mockData = createJsonApiResponse([
-        { id: "1", type: "configurations", attributes: { name: "Laptop-01" } },
-      ]);
-
-      mockFetch.mockResolvedValueOnce(createMockResponse(mockData));
-
-      const response = await fetch("https://api.itglue.com/configurations?filter[organization-id]=1&filter[configuration-type-id]=5");
-      const json = (await response.json()) as JsonApiResponse;
-
-      expect((json.data as JsonApiResource[]).length).toBe(1);
-    });
-
-    it("should search configurations by serial number", async () => {
-      const mockData = createJsonApiResponse([
-        { id: "1", type: "configurations", attributes: { name: "Server-01", "serial-number": "ABC123" } },
-      ]);
-
-      mockFetch.mockResolvedValueOnce(createMockResponse(mockData));
-
-      const response = await fetch("https://api.itglue.com/configurations?filter[serial-number]=ABC123");
-      const json = (await response.json()) as JsonApiResponse;
-
-      expect((json.data as JsonApiResource[])[0].attributes?.["serial-number"]).toBe("ABC123");
-    });
-  });
-
-  describe("get_configuration", () => {
-    it("should get a single configuration by ID", async () => {
-      const mockData: JsonApiResponse = {
-        data: {
-          id: "99999",
-          type: "configurations",
-          attributes: {
-            name: "Desktop-05",
-            "ip-address": "192.168.1.100",
-            "mac-address": "00:11:22:33:44:55",
-          },
-        },
-      };
-
-      mockFetch.mockResolvedValueOnce(createMockResponse(mockData));
-
-      const response = await fetch("https://api.itglue.com/configurations/99999");
-      const json = (await response.json()) as JsonApiResponse;
-
-      expect((json.data as JsonApiResource).id).toBe("99999");
-      expect((json.data as JsonApiResource).attributes?.["ip-address"]).toBe("192.168.1.100");
-    });
-  });
-
-  describe("search_passwords", () => {
-    it("should search passwords without showing password values", async () => {
-      const mockData = createJsonApiResponse([
-        {
-          id: "1",
-          type: "passwords",
-          attributes: {
-            name: "Admin Password",
-            username: "admin",
-            url: "https://example.com",
-            // password field should not be included in search
-          },
-        },
-      ]);
-
-      mockFetch.mockResolvedValueOnce(createMockResponse(mockData));
-
-      const response = await fetch("https://api.itglue.com/passwords?show_password=false");
-      const json = (await response.json()) as JsonApiResponse;
-
-      expect((json.data as JsonApiResource[])[0].attributes?.name).toBe("Admin Password");
-      expect((json.data as JsonApiResource[])[0].attributes?.password).toBeUndefined();
-    });
-
-    it("should filter passwords by category", async () => {
-      const mockData = createJsonApiResponse([
-        { id: "1", type: "passwords", attributes: { name: "Database Password" } },
-      ]);
-
-      mockFetch.mockResolvedValueOnce(createMockResponse(mockData));
-
-      const response = await fetch("https://api.itglue.com/passwords?filter[password-category-id]=5");
-      const json = (await response.json()) as JsonApiResponse;
-
-      expect((json.data as JsonApiResource[]).length).toBe(1);
-    });
-
-    it("should filter passwords by username", async () => {
-      const mockData = createJsonApiResponse([
-        { id: "1", type: "passwords", attributes: { name: "Admin Password", username: "admin" } },
-      ]);
-
-      mockFetch.mockResolvedValueOnce(createMockResponse(mockData));
-
-      const response = await fetch("https://api.itglue.com/passwords?filter[username]=admin");
-      const json = (await response.json()) as JsonApiResponse;
-
-      expect((json.data as JsonApiResource[])[0].attributes?.username).toBe("admin");
-    });
-  });
-
-  describe("get_password", () => {
-    it("should get a password with show_password=true by default", async () => {
-      const mockData: JsonApiResponse = {
-        data: {
-          id: "55555",
-          type: "passwords",
-          attributes: {
-            name: "Server Root Password",
-            username: "root",
-            password: "secret123",
-          },
-        },
-      };
-
-      mockFetch.mockResolvedValueOnce(createMockResponse(mockData));
-
-      const response = await fetch("https://api.itglue.com/passwords/55555?show_password=true");
-      const json = (await response.json()) as JsonApiResponse;
-
-      expect((json.data as JsonApiResource).attributes?.password).toBe("secret123");
-    });
-
-    it("should respect show_password=false option", async () => {
-      const mockData: JsonApiResponse = {
-        data: {
-          id: "55555",
-          type: "passwords",
-          attributes: {
-            name: "Server Root Password",
-            username: "root",
-            // No password field
-          },
-        },
-      };
-
-      mockFetch.mockResolvedValueOnce(createMockResponse(mockData));
-
-      const response = await fetch("https://api.itglue.com/passwords/55555?show_password=false");
-      const json = (await response.json()) as JsonApiResponse;
-
-      expect((json.data as JsonApiResource).attributes?.password).toBeUndefined();
-    });
-  });
-
-  describe("search_documents", () => {
-    it("should search documents by organization", async () => {
-      const mockData = createJsonApiResponse([
-        { id: "1", type: "documents", attributes: { name: "Network Diagram", content: "..." } },
-        { id: "2", type: "documents", attributes: { name: "Setup Guide", content: "..." } },
-      ]);
-
-      mockFetch.mockResolvedValueOnce(createMockResponse(mockData));
-
-      const response = await fetch("https://api.itglue.com/organizations/123/relationships/documents?page[size]=50&page[number]=1");
-      const json = (await response.json()) as JsonApiResponse;
-
-      expect((json.data as JsonApiResource[]).length).toBe(2);
-      expect((json.data as JsonApiResource[])[0].attributes?.name).toBe("Network Diagram");
-    });
-
-    it("should search documents by name within organization", async () => {
-      const mockData = createJsonApiResponse([
-        { id: "1", type: "documents", attributes: { name: "Security Policy" } },
-      ]);
-
-      mockFetch.mockResolvedValueOnce(createMockResponse(mockData));
-
-      const response = await fetch("https://api.itglue.com/organizations/123/relationships/documents?filter[name]=Security&page[size]=50&page[number]=1");
-      const json = (await response.json()) as JsonApiResponse;
-
-      expect((json.data as JsonApiResource[])[0].attributes?.name).toBe("Security Policy");
-    });
-  });
+  // search_organizations, get_organization, search_configurations,
+  // get_configuration and search_documents used to be "tested" here by calling
+  // the fetch mock directly and asserting on the payload the mock had just been
+  // handed — the handlers never ran. Real round-trip coverage now lives in
+  // "Core tools (round-trip)" below (and, for search_documents, in
+  // "Document folder access (API-key-first, round-trip)").
 
   // Regression tests for wyre-technology/msp-claude-plugins#134: an org-wide
   // search_documents returns only ROOT-LEVEL documents (IT Glue API limitation),
@@ -875,6 +577,22 @@ describe("Tool Handler Integration", () => {
     it("leaves documents without a content field untouched", () => {
       const docs = [{ id: "2", name: "Root Doc", documentFolderId: null }];
       expect(stripDocumentBodies(docs)).toEqual(docs);
+    });
+  });
+
+  describe("stripPasswordValues", () => {
+    it("removes the secret while preserving every other field", () => {
+      const stripped = stripPasswordValues([
+        { id: "1", name: "VPN Admin", username: "admin", password: "hunter2" },
+      ]);
+      expect(stripped).toEqual([
+        { id: "1", name: "VPN Admin", username: "admin" },
+      ]);
+    });
+
+    it("leaves records without a password field untouched", () => {
+      const pws = [{ id: "2", name: "No Secret", username: "svc" }];
+      expect(stripPasswordValues(pws)).toEqual(pws);
     });
   });
 
@@ -1352,316 +1070,56 @@ describe("Tool Handler Integration", () => {
     });
   });
 
-  describe("list_document_sections", () => {
-    it("should list sections for a document", async () => {
-      const mockData = createJsonApiResponse([
-        { id: "1001", type: "document-sections", attributes: { content: "<h2>Overview</h2>", "section-type": "Document::Heading", position: 1 } },
-        { id: "1002", type: "document-sections", attributes: { content: "<p>Details here.</p>", "section-type": "Document::Text", position: 2 } },
-      ]);
-
-      mockFetch.mockResolvedValueOnce(createMockResponse(mockData));
-
-      const response = await fetch("https://api.itglue.com/documents/789/relationships/sections");
-      const json = (await response.json()) as JsonApiResponse;
-
-      expect((json.data as JsonApiResource[]).length).toBe(2);
-      expect((json.data as JsonApiResource[])[0].attributes?.["section-type"]).toBe("Document::Heading");
-    });
-  });
-
-  describe("create_document_section", () => {
-    it("should map 'heading' type to Document::Heading", () => {
-      const sectionTypeMap: Record<string, string> = { heading: "Document::Heading", text: "Document::Text" };
-      expect(sectionTypeMap["heading"]).toBe("Document::Heading");
-    });
-
-    it("should map 'text' type to Document::Text", () => {
-      const sectionTypeMap: Record<string, string> = { heading: "Document::Heading", text: "Document::Text" };
-      expect(sectionTypeMap["text"]).toBe("Document::Text");
-    });
-
-    it("should post a new section to the sections endpoint", async () => {
-      const mockSection = { id: "1003", type: "document-sections", attributes: { content: "<p>New section.</p>", "section-type": "Document::Text" } };
-      mockFetch.mockResolvedValueOnce(createMockResponse({ data: mockSection, meta: {} }));
-
-      const response = await fetch("https://api.itglue.com/documents/789/relationships/sections", {
-        method: "POST",
-        headers: { "Content-Type": "application/vnd.api+json" },
-        body: JSON.stringify({ data: { type: "document-sections", attributes: { "section-type": "Document::Text", content: "<p>New section.</p>" } } }),
-      });
-
-      expect(mockFetch).toHaveBeenCalledWith(
-        "https://api.itglue.com/documents/789/relationships/sections",
-        expect.objectContaining({ method: "POST" })
-      );
-      expect(response.ok).toBe(true);
-    });
-
-    // BUG TEST #2: This test demonstrates that create_document_section should include resource relationship
-    it("should include resource relationship in document section payload", async () => {
-      let capturedBody: string = "";
-
-      const mockSection = { id: "1003", type: "document-sections", attributes: { content: "<p>New section.</p>", "section-type": "Document::Text" } };
-      mockFetch.mockImplementation((_url: string, options: RequestInit) => {
-        capturedBody = options.body as string;
-        return createMockResponse({ data: mockSection, meta: {} });
-      });
-
-      // This should now POST with the correct payload that includes resource relationship
-      await fetch("https://api.itglue.com/documents/789/relationships/sections", {
-        method: "POST",
-        headers: { "Content-Type": "application/vnd.api+json" },
-        body: JSON.stringify({
-          data: {
-            type: "document-sections",
-            attributes: {
-              "section-type": "Document::Text",
-              content: "<p>New section.</p>"
-            },
-            relationships: {
-              resource: {
-                data: {
-                  type: "documents",
-                  id: "789"
-                }
-              }
-            }
-          }
-        }),
-      });
-
-      const parsedBody = JSON.parse(capturedBody);
-
-      // Verify basic structure
-      expect(parsedBody.data.type).toBe("document-sections");
-      expect(parsedBody.data.attributes["section-type"]).toBe("Document::Text");
-      expect(parsedBody.data.attributes.content).toBe("<p>New section.</p>");
-
-      // Verify the fix - should include relationships.resource binding (Option B)
-      expect(parsedBody.data.relationships?.resource?.data?.type).toBe("documents");
-      expect(parsedBody.data.relationships?.resource?.data?.id).toBe("789");
-    });
-
-    it("should fail with 400 error when resource relationship is missing", async () => {
-      // Mock the actual 400 error from IT Glue API
-      const errorResponse = {
-        errors: [{
-          title: "Bad Request",
-          detail: "param is missing or the value is empty: resource_type",
-          status: "400"
-        }]
-      };
-      mockFetch.mockResolvedValueOnce(createErrorResponse(400, JSON.stringify(errorResponse)));
-
-      const response = await fetch("https://api.itglue.com/documents/789/relationships/sections", {
-        method: "POST",
-        headers: { "Content-Type": "application/vnd.api+json" },
-        body: JSON.stringify({
-          data: {
-            type: "document-sections",
-            attributes: {
-              "section-type": "Document::Text",
-              content: "<p>New section.</p>"
-            }
-          }
-        }),
-      });
-
-      expect(response.ok).toBe(false);
-      expect(response.status).toBe(400);
-
-      const errorText = await response.text();
-      expect(errorText).toContain("resource_type");
-    });
-  });
-
-  describe("update_document_section", () => {
-    it("should patch the section with new content", async () => {
-      const mockSection = { id: "1002", type: "document-sections", attributes: { content: "<p>Updated.</p>" } };
-      mockFetch.mockResolvedValueOnce(createMockResponse({ data: mockSection, meta: {} }));
-
-      const response = await fetch("https://api.itglue.com/documents/789/relationships/sections/1002", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/vnd.api+json" },
-        body: JSON.stringify({ data: { type: "document-sections", attributes: { content: "<p>Updated.</p>" } } }),
-      });
-
-      expect(mockFetch).toHaveBeenCalledWith(
-        "https://api.itglue.com/documents/789/relationships/sections/1002",
-        expect.objectContaining({ method: "PATCH" })
-      );
-      expect(response.ok).toBe(true);
-    });
-  });
-
-  describe("delete_document_section", () => {
-    it("should delete a section", async () => {
-      mockFetch.mockResolvedValueOnce(createMockResponse(null, 204));
-
-      const response = await fetch("https://api.itglue.com/documents/789/relationships/sections/1002", {
-        method: "DELETE",
-      });
-
-      expect(mockFetch).toHaveBeenCalledWith(
-        "https://api.itglue.com/documents/789/relationships/sections/1002",
-        expect.objectContaining({ method: "DELETE" })
-      );
-      expect(response.status).toBe(204);
-    });
-  });
-
-  describe("publish_document", () => {
-    it("should use PATCH method (not POST)", async () => {
-      const mockDoc = { id: "789", type: "documents", attributes: { name: "My Doc" } };
-      mockFetch.mockResolvedValueOnce(createMockResponse({ data: mockDoc, meta: {} }));
-
-      const response = await fetch("https://api.itglue.com/documents/789/publish", {
-        method: "PATCH",
-      });
-
-      expect(mockFetch).toHaveBeenCalledWith(
-        "https://api.itglue.com/documents/789/publish",
-        expect.objectContaining({ method: "PATCH" })
-      );
-      expect(response.ok).toBe(true);
-    });
-  });
-
-  describe("archive_document / unarchive_document", () => {
-    // Pins the URL, method, and payload shape so a future refactor can't
-    // silently omit `archived` or swap to a non-existent /archive sub-endpoint.
-    it.each([true, false])("PATCH /documents/:id with archived=%s", async (archived) => {
-      mockFetch.mockResolvedValueOnce(createMockResponse({ data: {}, meta: {} }));
-
-      await fetch("https://api.itglue.com/documents/789", {
-        method: "PATCH",
-        body: JSON.stringify({
-          data: { type: "documents", attributes: { archived } },
-        }),
-      });
-
-      const [, init] = mockFetch.mock.calls[0];
-      expect(mockFetch).toHaveBeenCalledWith(
-        "https://api.itglue.com/documents/789",
-        expect.objectContaining({ method: "PATCH" })
-      );
-      expect(JSON.parse(init.body as string)).toEqual({
-        data: { type: "documents", attributes: { archived } },
-      });
-    });
-  });
-
-  describe("search_flexible_assets", () => {
-    it("should require flexible_asset_type_id", () => {
-      const args: Record<string, number> = { organization_id: 1 };
-      const hasRequiredField = "flexible_asset_type_id" in args;
-
-      expect(hasRequiredField).toBe(false);
-    });
-
-    it("should search flexible assets with type ID", async () => {
-      const mockData = createJsonApiResponse([
-        {
-          id: "1",
-          type: "flexible-assets",
-          attributes: { name: "Network Asset", traits: { "ip-address": "10.0.0.1" } },
-        },
-      ]);
-
-      mockFetch.mockResolvedValueOnce(createMockResponse(mockData));
-
-      const response = await fetch("https://api.itglue.com/flexible_assets?filter[flexible-asset-type-id]=5");
-      const json = (await response.json()) as JsonApiResponse;
-
-      expect((json.data as JsonApiResource[])[0].type).toBe("flexible-assets");
-      expect((json.data as JsonApiResource[])[0].attributes?.name).toBe("Network Asset");
-    });
-
-    it("should filter flexible assets by organization", async () => {
-      const mockData = createJsonApiResponse([
-        { id: "1", type: "flexible-assets", attributes: { name: "Asset 1" } },
-      ]);
-
-      mockFetch.mockResolvedValueOnce(createMockResponse(mockData));
-
-      const response = await fetch("https://api.itglue.com/flexible_assets?filter[flexible-asset-type-id]=5&filter[organization-id]=123");
-      const json = (await response.json()) as JsonApiResponse;
-
-      expect((json.data as JsonApiResource[]).length).toBe(1);
-    });
-  });
-
-  describe("itglue_health_check", () => {
-    it("should return success status when API is reachable", async () => {
-      const mockData = createJsonApiResponse(
-        [{ id: "1", type: "organization-types", attributes: { name: "Customer" } }],
-        { "total-count": 5 }
-      );
-
-      mockFetch.mockResolvedValueOnce(createMockResponse(mockData));
-
-      const response = await fetch("https://api.itglue.com/organization_types?page[size]=1");
-      const json = (await response.json()) as JsonApiResponse;
-
-      const healthResponse = {
-        status: "ok",
-        message: "IT Glue API is reachable",
-        region: "us",
-        organizationTypesFound: json.meta?.["total-count"],
-      };
-
-      expect(healthResponse.status).toBe("ok");
-      expect(healthResponse.organizationTypesFound).toBe(5);
-    });
-
-    it("should return error when API is unreachable", async () => {
-      mockFetch.mockRejectedValueOnce(new Error("Network error"));
-
-      await expect(fetch("https://api.itglue.com/organization_types")).rejects.toThrow("Network error");
-    });
-
-    it("should return error for authentication failure", async () => {
-      mockFetch.mockResolvedValueOnce(createErrorResponse(401, "Invalid API Key"));
-
-      const response = await fetch("https://api.itglue.com/organization_types");
-      expect(response.ok).toBe(false);
-      expect(response.status).toBe(401);
-    });
-  });
+  // The document-section, publish/archive, flexible-asset and health-check
+  // tools were also only ever exercised against the fetch mock directly. Their
+  // real round-trip coverage lives in "Document section tools (round-trip)" and
+  // "Core tools (round-trip)" below.
 });
 
 describe("Unknown Tool Handling", () => {
-  it("should return error for unknown tool name", () => {
-    const unknownTool = "nonexistent_tool";
-    const knownTools = [
-      "search_organizations",
-      "get_organization",
-      "search_configurations",
-      "get_configuration",
-      "search_passwords",
-      "get_password",
-      "search_documents",
-      "search_flexible_assets",
-      "itglue_health_check",
-    ];
-
-    expect(knownTools.includes(unknownTool)).toBe(false);
+  // Previously this asserted `knownTools.length === 9` against a list literal
+  // the test itself wrote — while the server registered 25 tools. It tracked
+  // the test's own copy of reality, not the server's.
+  beforeEach(() => {
+    vi.clearAllMocks();
   });
 
-  it("should list all known tools", () => {
-    const knownTools = [
-      "search_organizations",
-      "get_organization",
-      "search_configurations",
-      "get_configuration",
-      "search_passwords",
-      "get_password",
-      "search_documents",
-      "search_flexible_assets",
-      "itglue_health_check",
-    ];
+  async function connectClient(): Promise<Client> {
+    const server = createMcpServer({ apiKey: "test-api-key" });
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    const client = new Client({ name: "unknown-tool-test", version: "1.0.0" });
+    await client.connect(clientTransport);
+    return client;
+  }
 
-    expect(knownTools.length).toBe(9);
+  it("returns an error result for a tool the server does not implement", async () => {
+    const client = await connectClient();
+    const result = (await client.callTool({
+      name: "nonexistent_tool",
+      arguments: {},
+    })) as { isError?: boolean; content?: Array<{ text?: string }> };
+
+    expect(result.isError).toBe(true);
+    expect(result.content?.[0]?.text).toContain("Unknown tool: nonexistent_tool");
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it("advertises exactly the tools it can dispatch", async () => {
+    const client = await connectClient();
+    const { tools } = await client.listTools();
+
+    expect(tools.length).toBe(25);
+    // Every advertised tool must reach a real branch — not the Unknown-tool
+    // default — so a rename in the ListTools block can't drift from the switch.
+    for (const tool of tools) {
+      const result = (await client.callTool({
+        name: tool.name,
+        arguments: {},
+      })) as { content?: Array<{ text?: string }> };
+      expect(result.content?.[0]?.text ?? "").not.toContain("Unknown tool:");
+    }
   });
 });
 
@@ -2326,6 +1784,1165 @@ describe("Locations tools (round-trip)", () => {
     });
     expect(isError(result)).toBe(true);
     expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  // unscopedSearchNote() is wired into search_locations as well as
+  // search_passwords and search_configurations: when elicitation cannot reach
+  // the client the handler drops org scoping, and "the Chattanooga office for
+  // Acme" quietly becomes "every Chattanooga office in the account".
+  it("flags an account-wide search when no organization_id was given", async () => {
+    const client = await connectLocationsClient();
+    mockFetch.mockResolvedValueOnce(
+      createMockResponse(
+        createJsonApiResponse([
+          { id: "5", type: "locations", attributes: { name: "Primary Address" } },
+        ])
+      )
+    );
+
+    const result = await client.callTool({
+      name: "search_locations",
+      arguments: { city: "Chattanooga" },
+    });
+
+    const url = decodeURIComponent(mockFetch.mock.calls[0][0] as string);
+    expect(url).not.toContain("filter[organization-id]");
+    const text = firstText(result);
+    expect(text).toContain("ALL organizations");
+    expect(text.toLowerCase()).toContain("organization_id");
+  });
+
+  it("does not flag an organization-scoped search", async () => {
+    const client = await connectLocationsClient();
+    mockFetch.mockResolvedValueOnce(
+      createMockResponse(createJsonApiResponse([]))
+    );
+
+    const result = await client.callTool({
+      name: "search_locations",
+      arguments: { organization_id: 8637099 },
+    });
+
+    expect(firstText(result)).not.toContain("ALL organizations");
+  });
+
+  // See the equivalent search_configurations test: the warning must track the
+  // filter that was actually sent, not the raw argument.
+  it("flags the search when a falsy organization_id drops the filter", async () => {
+    const client = await connectLocationsClient();
+    mockFetch.mockResolvedValueOnce(
+      createMockResponse(createJsonApiResponse([]))
+    );
+
+    const result = await client.callTool({
+      name: "search_locations",
+      arguments: { organization_id: 0 },
+    });
+
+    const url = decodeURIComponent(mockFetch.mock.calls[0][0] as string);
+    expect(url).not.toContain("filter[organization-id]");
+    expect(firstText(result)).toContain("ALL organizations");
+  });
+});
+
+// Exercises the REAL password handlers (CallTool) over an in-memory transport
+// pair. The previous "password" tests in this file mocked fetch and then called
+// fetch directly, asserting on the mock's own payload — the search_passwords /
+// get_password handlers were never executed, so the whole surface was
+// effectively untested. fetch stays mocked underneath.
+describe("Password tools (round-trip)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  async function connectPasswordClient(): Promise<Client> {
+    const server = createMcpServer({ apiKey: "test-api-key" });
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    const client = new Client({ name: "passwords-test", version: "1.0.0" });
+    await client.connect(clientTransport);
+    return client;
+  }
+
+  function firstText(result: unknown): string {
+    const r = result as { content?: Array<{ text?: string }> };
+    return r.content?.[0]?.text ?? "";
+  }
+
+  function isError(result: unknown): boolean {
+    return (result as { isError?: boolean }).isError === true;
+  }
+
+  it("search_passwords scopes to the organization and forces show_password=false", async () => {
+    const client = await connectPasswordClient();
+    mockFetch.mockResolvedValueOnce(
+      createMockResponse(
+        createJsonApiResponse([
+          {
+            id: "1",
+            type: "passwords",
+            attributes: { name: "VPN Admin", username: "admin" },
+          },
+        ])
+      )
+    );
+
+    const result = await client.callTool({
+      name: "search_passwords",
+      arguments: { organization_id: 8637099 },
+    });
+
+    const url = decodeURIComponent(mockFetch.mock.calls[0][0] as string);
+    expect(url).toContain("/passwords?");
+    expect(url).toContain("filter[organization-id]=8637099");
+    // Security: a list call must never ask IT Glue for secret material.
+    expect(url).toContain("show_password=false");
+    expect(firstText(result)).toContain("VPN Admin");
+  });
+
+  it("search_passwords never returns a password value even if the API sends one", async () => {
+    // The fixture deliberately DOES carry a secret: show_password=false is a
+    // request to IT Glue, not a guarantee, so the list tool has to redact on the
+    // way out too. An earlier version of this test used a secret-free fixture
+    // and therefore passed against a handler that had no redaction at all.
+    const client = await connectPasswordClient();
+    mockFetch.mockResolvedValueOnce(
+      createMockResponse(
+        createJsonApiResponse([
+          {
+            id: "1",
+            type: "passwords",
+            attributes: {
+              name: "VPN Admin",
+              username: "admin",
+              password: "hunter2",
+            },
+          },
+        ])
+      )
+    );
+
+    const result = await client.callTool({
+      name: "search_passwords",
+      arguments: { organization_id: 8637099 },
+    });
+
+    const text = firstText(result);
+    expect(text).not.toContain("hunter2");
+    // the rest of the record still comes through
+    expect(text).toContain("VPN Admin");
+    expect(text).toContain("admin");
+  });
+
+  it("get_password still returns the secret — redaction is list-only", async () => {
+    const client = await connectPasswordClient();
+    mockFetch.mockResolvedValueOnce(
+      createMockResponse({
+        data: {
+          id: "55555",
+          type: "passwords",
+          attributes: { name: "Server Root", password: "hunter2" },
+        },
+      })
+    );
+
+    const result = await client.callTool({
+      name: "get_password",
+      arguments: { id: "55555" },
+    });
+
+    expect(firstText(result)).toContain("hunter2");
+  });
+
+  it("search_passwords passes name, username and category filters through", async () => {
+    const client = await connectPasswordClient();
+    mockFetch.mockResolvedValueOnce(
+      createMockResponse(createJsonApiResponse([]))
+    );
+
+    await client.callTool({
+      name: "search_passwords",
+      arguments: {
+        organization_id: 8637099,
+        name: "VPN",
+        username: "admin",
+        password_category_id: 5,
+      },
+    });
+
+    const url = decodeURIComponent(mockFetch.mock.calls[0][0] as string);
+    expect(url).toContain("filter[name]=VPN");
+    expect(url).toContain("filter[username]=admin");
+    expect(url).toContain("filter[password-category-id]=5");
+  });
+
+  it("get_password requests the secret value by default", async () => {
+    const client = await connectPasswordClient();
+    mockFetch.mockResolvedValueOnce(
+      createMockResponse({
+        data: {
+          id: "55555",
+          type: "passwords",
+          attributes: { name: "Server Root", username: "root", password: "hunter2" },
+        },
+      })
+    );
+
+    const result = await client.callTool({
+      name: "get_password",
+      arguments: { id: "55555" },
+    });
+
+    const url = decodeURIComponent(mockFetch.mock.calls[0][0] as string);
+    expect(url).toContain("/passwords/55555");
+    expect(url).toContain("show_password=true");
+    expect(firstText(result)).toContain("hunter2");
+  });
+
+  it("get_password honours show_password=false", async () => {
+    const client = await connectPasswordClient();
+    mockFetch.mockResolvedValueOnce(
+      createMockResponse({
+        data: {
+          id: "55555",
+          type: "passwords",
+          attributes: { name: "Server Root", username: "root" },
+        },
+      })
+    );
+
+    await client.callTool({
+      name: "get_password",
+      arguments: { id: "55555", show_password: false },
+    });
+
+    const url = decodeURIComponent(mockFetch.mock.calls[0][0] as string);
+    expect(url).toContain("show_password=false");
+  });
+
+  it("get_password returns an error when id is missing", async () => {
+    const client = await connectPasswordClient();
+    const result = await client.callTool({
+      name: "get_password",
+      arguments: {},
+    });
+    expect(isError(result)).toBe(true);
+    expect(firstText(result).toLowerCase()).toContain("id is required");
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it("flags an account-wide search when no organization_id was given and the client cannot be asked", async () => {
+    // Through a gateway that does not proxy elicitation, elicitText() returns
+    // null and the handler silently drops org scoping — a caller asking for
+    // "the VPN password for Acme" gets an arbitrary slice of every org's
+    // passwords and concludes the entry does not exist. The result must say so.
+    const client = await connectPasswordClient();
+    mockFetch.mockResolvedValueOnce(
+      createMockResponse(
+        createJsonApiResponse([
+          { id: "1", type: "passwords", attributes: { name: "VPN Admin" } },
+        ])
+      )
+    );
+
+    const result = await client.callTool({
+      name: "search_passwords",
+      arguments: { name: "VPN" },
+    });
+
+    const url = decodeURIComponent(mockFetch.mock.calls[0][0] as string);
+    expect(url).not.toContain("filter[organization-id]");
+    const text = firstText(result);
+    expect(text).toContain("ALL organizations");
+    // and must not let the caller read an unscoped miss as "does not exist"
+    expect(text.toLowerCase()).toContain("organization_id");
+  });
+
+  it("does not flag an organization-scoped search", async () => {
+    const client = await connectPasswordClient();
+    mockFetch.mockResolvedValueOnce(
+      createMockResponse(createJsonApiResponse([]))
+    );
+
+    const result = await client.callTool({
+      name: "search_passwords",
+      arguments: { organization_id: 8637099 },
+    });
+
+    expect(firstText(result)).not.toContain("ALL organizations");
+  });
+
+  // See the equivalent search_configurations test: the warning must track the
+  // filter that was actually sent, not the raw argument.
+  it("flags the search when a falsy organization_id drops the filter", async () => {
+    const client = await connectPasswordClient();
+    mockFetch.mockResolvedValueOnce(
+      createMockResponse(createJsonApiResponse([]))
+    );
+
+    const result = await client.callTool({
+      name: "search_passwords",
+      arguments: { organization_id: 0 },
+    });
+
+    const url = decodeURIComponent(mockFetch.mock.calls[0][0] as string);
+    expect(url).not.toContain("filter[organization-id]");
+    expect(firstText(result)).toContain("ALL organizations");
+  });
+
+  it("surfaces an IT Glue 404 rather than reporting an empty result", async () => {
+    const client = await connectPasswordClient();
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 404,
+      text: async () => '{"errors":[{"status":404,"title":"Not Found"}]}',
+    } as Response);
+
+    const result = await client.callTool({
+      name: "get_password",
+      arguments: { id: "does-not-exist" },
+    });
+
+    expect(isError(result)).toBe(true);
+    expect(firstText(result)).toContain("404");
+  });
+});
+
+// Round-trip coverage for the organization, configuration, flexible-asset and
+// health-check tools. These handlers previously had no test that executed them
+// at all: the suite called the fetch mock directly and asserted on the payload
+// it had just supplied, so the tools could have been deleted outright and the
+// suite would still have been green.
+describe("Core tools (round-trip)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  async function connectCoreClient(): Promise<Client> {
+    const server = createMcpServer({ apiKey: "test-api-key" });
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    const client = new Client({ name: "core-test", version: "1.0.0" });
+    await client.connect(clientTransport);
+    return client;
+  }
+
+  function firstText(result: unknown): string {
+    const r = result as { content?: Array<{ text?: string }> };
+    return r.content?.[0]?.text ?? "";
+  }
+
+  function isError(result: unknown): boolean {
+    return (result as { isError?: boolean }).isError === true;
+  }
+
+  function decodedUrl(callIndex = 0): string {
+    return decodeURIComponent(mockFetch.mock.calls[callIndex][0] as string);
+  }
+
+  describe("search_organizations", () => {
+    it("pages the unfiltered listing and returns the organizations", async () => {
+      const client = await connectCoreClient();
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse(
+          createJsonApiResponse([
+            { id: "1", type: "organizations", attributes: { name: "Acme Corp" } },
+            { id: "2", type: "organizations", attributes: { name: "Beta Inc" } },
+          ])
+        )
+      );
+
+      const result = await client.callTool({
+        name: "search_organizations",
+        arguments: {},
+      });
+
+      const url = decodedUrl();
+      expect(url).toContain("/organizations?");
+      expect(url).toContain("page[size]=50");
+      expect(url).toContain("page[number]=1");
+      expect(firstText(result)).toContain("Acme Corp");
+    });
+
+    it("passes the name filter through as filter[name]", async () => {
+      const client = await connectCoreClient();
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse(createJsonApiResponse([]))
+      );
+
+      await client.callTool({
+        name: "search_organizations",
+        arguments: { name: "Acme" },
+      });
+
+      expect(decodedUrl()).toContain("filter[name]=Acme");
+    });
+
+    it("kebab-cases the type/status filters and forwards sort and pagination", async () => {
+      const client = await connectCoreClient();
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse(createJsonApiResponse([]))
+      );
+
+      await client.callTool({
+        name: "search_organizations",
+        arguments: {
+          organization_type_id: 7,
+          organization_status_id: 9,
+          sort: "-name",
+          page_size: 25,
+          page_number: 2,
+        },
+      });
+
+      const url = decodedUrl();
+      expect(url).toContain("filter[organization-type-id]=7");
+      expect(url).toContain("filter[organization-status-id]=9");
+      expect(url).toContain("sort=-name");
+      expect(url).toContain("page[size]=25");
+      expect(url).toContain("page[number]=2");
+    });
+
+    it("sends the API key and JSON:API headers on the handler's own request", async () => {
+      const client = await connectCoreClient();
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse(createJsonApiResponse([]))
+      );
+
+      await client.callTool({
+        name: "search_organizations",
+        arguments: { name: "Acme" },
+      });
+
+      const headers = (mockFetch.mock.calls[0][1] as RequestInit)
+        .headers as Record<string, string>;
+      expect(headers["x-api-key"]).toBe("test-api-key");
+      expect(headers["Content-Type"]).toBe("application/vnd.api+json");
+      expect(headers["Accept"]).toBe("application/vnd.api+json");
+    });
+  });
+
+  describe("get_organization", () => {
+    it("fetches a single organization by id", async () => {
+      const client = await connectCoreClient();
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({
+          data: {
+            id: "12345",
+            type: "organizations",
+            attributes: { name: "Acme Corp", "short-name": "ACME" },
+          },
+        })
+      );
+
+      const result = await client.callTool({
+        name: "get_organization",
+        arguments: { id: 12345 },
+      });
+
+      expect(mockFetch.mock.calls[0][0]).toBe(
+        "https://api.itglue.com/organizations/12345"
+      );
+      expect(firstText(result)).toContain("Acme Corp");
+    });
+
+    it("returns an error without calling the API when id is missing", async () => {
+      const client = await connectCoreClient();
+      const result = await client.callTool({
+        name: "get_organization",
+        arguments: {},
+      });
+
+      expect(isError(result)).toBe(true);
+      expect(firstText(result)).toContain("Organization ID is required");
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it("surfaces an IT Glue 404 as an error result", async () => {
+      const client = await connectCoreClient();
+      mockFetch.mockResolvedValueOnce(createErrorResponse(404, "Not Found"));
+
+      const result = await client.callTool({
+        name: "get_organization",
+        arguments: { id: 999999 },
+      });
+
+      expect(isError(result)).toBe(true);
+      expect(firstText(result)).toContain("404");
+    });
+  });
+
+  describe("search_configurations", () => {
+    it("scopes to the organization and returns the configurations", async () => {
+      const client = await connectCoreClient();
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse(
+          createJsonApiResponse([
+            {
+              id: "1",
+              type: "configurations",
+              attributes: { name: "Server-01", "serial-number": "SN12345" },
+            },
+          ])
+        )
+      );
+
+      const result = await client.callTool({
+        name: "search_configurations",
+        arguments: { organization_id: 123 },
+      });
+
+      const url = decodedUrl();
+      expect(url).toContain("/configurations?");
+      expect(url).toContain("filter[organization-id]=123");
+      expect(firstText(result)).toContain("SN12345");
+    });
+
+    it("kebab-cases every configuration filter it accepts", async () => {
+      const client = await connectCoreClient();
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse(createJsonApiResponse([]))
+      );
+
+      await client.callTool({
+        name: "search_configurations",
+        arguments: {
+          organization_id: 1,
+          name: "Laptop-01",
+          configuration_type_id: 5,
+          configuration_status_id: 6,
+          serial_number: "ABC123",
+          rmm_id: "rmm-1",
+          psa_id: "psa-1",
+        },
+      });
+
+      const url = decodedUrl();
+      expect(url).toContain("filter[organization-id]=1");
+      expect(url).toContain("filter[name]=Laptop-01");
+      expect(url).toContain("filter[configuration-type-id]=5");
+      expect(url).toContain("filter[configuration-status-id]=6");
+      expect(url).toContain("filter[serial-number]=ABC123");
+      expect(url).toContain("filter[rmm-id]=rmm-1");
+      expect(url).toContain("filter[psa-id]=psa-1");
+    });
+
+    // unscopedSearchNote() is wired into search_configurations as well as
+    // search_passwords: through a gateway that cannot proxy elicitation the
+    // handler silently drops org scoping, and a caller asking for "the switch
+    // at Acme" gets an arbitrary slice of every org's configurations.
+    it("flags an account-wide search when no organization_id was given", async () => {
+      const client = await connectCoreClient();
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse(
+          createJsonApiResponse([
+            { id: "1", type: "configurations", attributes: { name: "Server-01" } },
+          ])
+        )
+      );
+
+      const result = await client.callTool({
+        name: "search_configurations",
+        arguments: { name: "Server" },
+      });
+
+      expect(decodedUrl()).not.toContain("filter[organization-id]");
+      const text = firstText(result);
+      expect(text).toContain("ALL organizations");
+      expect(text.toLowerCase()).toContain("organization_id");
+    });
+
+    it("does not flag an organization-scoped search", async () => {
+      const client = await connectCoreClient();
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse(createJsonApiResponse([]))
+      );
+
+      const result = await client.callTool({
+        name: "search_configurations",
+        arguments: { organization_id: 123 },
+      });
+
+      expect(firstText(result)).not.toContain("ALL organizations");
+    });
+
+    // The filter is applied under `if (orgId)` but the warning used to be gated
+    // on `orgId === undefined`. A falsy-but-present id fell through the gap:
+    // the org filter was dropped AND the warning suppressed — the exact silent
+    // account-wide search the note exists to prevent.
+    it("flags the search when a falsy organization_id drops the filter", async () => {
+      const client = await connectCoreClient();
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse(createJsonApiResponse([]))
+      );
+
+      const result = await client.callTool({
+        name: "search_configurations",
+        arguments: { organization_id: 0 },
+      });
+
+      expect(decodedUrl()).not.toContain("filter[organization-id]");
+      expect(firstText(result)).toContain("ALL organizations");
+    });
+  });
+
+  describe("get_configuration", () => {
+    it("fetches a single configuration by id", async () => {
+      const client = await connectCoreClient();
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({
+          data: {
+            id: "99999",
+            type: "configurations",
+            attributes: { name: "Desktop-05", "ip-address": "192.168.1.100" },
+          },
+        })
+      );
+
+      const result = await client.callTool({
+        name: "get_configuration",
+        arguments: { id: 99999 },
+      });
+
+      expect(mockFetch.mock.calls[0][0]).toBe(
+        "https://api.itglue.com/configurations/99999"
+      );
+      expect(firstText(result)).toContain("192.168.1.100");
+    });
+
+    it("returns an error without calling the API when id is missing", async () => {
+      const client = await connectCoreClient();
+      const result = await client.callTool({
+        name: "get_configuration",
+        arguments: {},
+      });
+
+      expect(isError(result)).toBe(true);
+      expect(firstText(result)).toContain("Configuration ID is required");
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("list_flexible_asset_types", () => {
+    it("lists the types with a 100-per-page window", async () => {
+      const client = await connectCoreClient();
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse(
+          createJsonApiResponse([
+            {
+              id: "5",
+              type: "flexible-asset-types",
+              attributes: { name: "SSL Certificate" },
+            },
+          ])
+        )
+      );
+
+      const result = await client.callTool({
+        name: "list_flexible_asset_types",
+        arguments: {},
+      });
+
+      const url = decodedUrl();
+      expect(url).toContain("/flexible_asset_types?");
+      expect(url).toContain("page[size]=100");
+      expect(url).not.toContain("filter[");
+      expect(firstText(result)).toContain("SSL Certificate");
+    });
+
+    it("scopes the types to an organization when one is given", async () => {
+      const client = await connectCoreClient();
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse(createJsonApiResponse([]))
+      );
+
+      await client.callTool({
+        name: "list_flexible_asset_types",
+        arguments: { organization_id: 123 },
+      });
+
+      expect(decodedUrl()).toContain("filter[organization-id]=123");
+    });
+  });
+
+  describe("search_flexible_assets", () => {
+    it("refuses to search without flexible_asset_type_id", async () => {
+      const client = await connectCoreClient();
+      const result = await client.callTool({
+        name: "search_flexible_assets",
+        arguments: { organization_id: 1 },
+      });
+
+      expect(isError(result)).toBe(true);
+      expect(firstText(result)).toContain("flexible_asset_type_id is required");
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it("filters by the flexible asset type id", async () => {
+      const client = await connectCoreClient();
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse(
+          createJsonApiResponse([
+            {
+              id: "1",
+              type: "flexible-assets",
+              attributes: { name: "Network Asset" },
+            },
+          ])
+        )
+      );
+
+      const result = await client.callTool({
+        name: "search_flexible_assets",
+        arguments: { flexible_asset_type_id: 5 },
+      });
+
+      const url = decodedUrl();
+      expect(url).toContain("/flexible_assets?");
+      expect(url).toContain("filter[flexible-asset-type-id]=5");
+      expect(firstText(result)).toContain("Network Asset");
+    });
+
+    it("adds the organization and name filters alongside the type", async () => {
+      const client = await connectCoreClient();
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse(createJsonApiResponse([]))
+      );
+
+      await client.callTool({
+        name: "search_flexible_assets",
+        arguments: {
+          flexible_asset_type_id: 5,
+          organization_id: 123,
+          name: "wildcard",
+        },
+      });
+
+      const url = decodedUrl();
+      expect(url).toContain("filter[flexible-asset-type-id]=5");
+      expect(url).toContain("filter[organization-id]=123");
+      expect(url).toContain("filter[name]=wildcard");
+    });
+  });
+
+  describe("itglue_health_check", () => {
+    it("probes /organization_types and reports the region and the count", async () => {
+      const client = await connectCoreClient();
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse(
+          createJsonApiResponse(
+            [
+              {
+                id: "1",
+                type: "organization-types",
+                attributes: { name: "Customer" },
+              },
+            ],
+            { "total-count": 5 }
+          )
+        )
+      );
+
+      const result = await client.callTool({
+        name: "itglue_health_check",
+        arguments: {},
+      });
+
+      const url = decodedUrl();
+      expect(url).toContain("/organization_types?");
+      expect(url).toContain("page[size]=1");
+
+      expect(isError(result)).toBe(false);
+      const payload = JSON.parse(firstText(result));
+      expect(payload).toMatchObject({
+        status: "ok",
+        region: "us",
+        organizationTypesFound: 5,
+      });
+    });
+
+    it("reports an authentication failure as an error result", async () => {
+      const client = await connectCoreClient();
+      mockFetch.mockResolvedValueOnce(
+        createErrorResponse(401, "Invalid API Key")
+      );
+
+      const result = await client.callTool({
+        name: "itglue_health_check",
+        arguments: {},
+      });
+
+      expect(isError(result)).toBe(true);
+      expect(firstText(result)).toContain("401");
+      expect(firstText(result)).toContain("Invalid API Key");
+    });
+
+    it("reports an unreachable API as an error result", async () => {
+      const client = await connectCoreClient();
+      mockFetch.mockRejectedValueOnce(new Error("Network error"));
+
+      const result = await client.callTool({
+        name: "itglue_health_check",
+        arguments: {},
+      });
+
+      expect(isError(result)).toBe(true);
+      expect(firstText(result)).toContain("Network error");
+    });
+  });
+});
+
+// Round-trip coverage for the document section / lifecycle tools. The previous
+// tests here asserted on request payloads the test itself had built; one of
+// them ("should include resource relationship in document section payload")
+// asserted the exact opposite of what the handler does, because it was never
+// run against the handler.
+describe("Document section tools (round-trip)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  async function connectSectionsClient(): Promise<Client> {
+    const server = createMcpServer({ apiKey: "test-api-key" });
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    const client = new Client({ name: "sections-test", version: "1.0.0" });
+    await client.connect(clientTransport);
+    return client;
+  }
+
+  function firstText(result: unknown): string {
+    const r = result as { content?: Array<{ text?: string }> };
+    return r.content?.[0]?.text ?? "";
+  }
+
+  function isError(result: unknown): boolean {
+    return (result as { isError?: boolean }).isError === true;
+  }
+
+  function requestOf(callIndex = 0): { url: string; init: RequestInit } {
+    const [url, init] = mockFetch.mock.calls[callIndex];
+    return { url: url as string, init: init as RequestInit };
+  }
+
+  function bodyOf(callIndex = 0): Record<string, unknown> {
+    return JSON.parse(requestOf(callIndex).init.body as string);
+  }
+
+  describe("list_document_sections", () => {
+    it("reads the document's sections relationship", async () => {
+      const client = await connectSectionsClient();
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse(
+          createJsonApiResponse([
+            {
+              id: "1001",
+              type: "document-sections",
+              attributes: { content: "<h2>Overview</h2>", position: 1 },
+            },
+          ])
+        )
+      );
+
+      const result = await client.callTool({
+        name: "list_document_sections",
+        arguments: { document_id: 789 },
+      });
+
+      expect(requestOf().url).toBe(
+        "https://api.itglue.com/documents/789/relationships/sections"
+      );
+      expect(requestOf().init.method).toBe("GET");
+      expect(firstText(result)).toContain("Overview");
+    });
+
+    it("returns an error without calling the API when document_id is missing", async () => {
+      const client = await connectSectionsClient();
+      const result = await client.callTool({
+        name: "list_document_sections",
+        arguments: {},
+      });
+
+      expect(isError(result)).toBe(true);
+      expect(firstText(result)).toContain("document_id is required");
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("create_document_section", () => {
+    // IT Glue stores the section kind in the `resource_type` ATTRIBUTE. A
+    // `relationships.resource` binding is rejected with a 400 for a missing
+    // `resource_type` (verified live 2026-04-23), so the payload must carry the
+    // attribute and no relationships member.
+    it.each([
+      ["heading", "Document::Heading"],
+      ["text", "Document::Text"],
+    ])("maps section_type '%s' to resource_type %s", async (arg, apiValue) => {
+      const client = await connectSectionsClient();
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({
+          data: {
+            id: "1003",
+            type: "document-sections",
+            attributes: { content: "<p>New section.</p>" },
+          },
+        })
+      );
+
+      await client.callTool({
+        name: "create_document_section",
+        arguments: {
+          document_id: 789,
+          section_type: arg,
+          content: "<p>New section.</p>",
+        },
+      });
+
+      const { url, init } = requestOf();
+      expect(url).toBe(
+        "https://api.itglue.com/documents/789/relationships/sections"
+      );
+      expect(init.method).toBe("POST");
+
+      const body = bodyOf() as {
+        data: {
+          type: string;
+          attributes: Record<string, unknown>;
+          relationships?: unknown;
+        };
+      };
+      expect(body.data.type).toBe("document-sections");
+      expect(body.data.attributes.resource_type).toBe(apiValue);
+      expect(body.data.attributes.content).toBe("<p>New section.</p>");
+      expect(body.data.relationships).toBeUndefined();
+    });
+
+    it("rejects a section_type outside heading/text before calling the API", async () => {
+      const client = await connectSectionsClient();
+      const result = await client.callTool({
+        name: "create_document_section",
+        arguments: {
+          document_id: 789,
+          section_type: "table",
+          content: "<p>x</p>",
+        },
+      });
+
+      expect(isError(result)).toBe(true);
+      expect(firstText(result)).toContain("'heading' or 'text'");
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it("requires document_id, section_type and content", async () => {
+      const client = await connectSectionsClient();
+      const result = await client.callTool({
+        name: "create_document_section",
+        arguments: { document_id: 789 },
+      });
+
+      expect(isError(result)).toBe(true);
+      expect(firstText(result)).toContain(
+        "document_id, section_type, and content are required"
+      );
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it("surfaces an IT Glue 400 instead of reporting a created section", async () => {
+      const client = await connectSectionsClient();
+      mockFetch.mockResolvedValueOnce(
+        createErrorResponse(
+          400,
+          JSON.stringify({
+            errors: [
+              {
+                title: "Bad Request",
+                detail: "param is missing or the value is empty: resource_type",
+                status: "400",
+              },
+            ],
+          })
+        )
+      );
+
+      const result = await client.callTool({
+        name: "create_document_section",
+        arguments: {
+          document_id: 789,
+          section_type: "text",
+          content: "<p>x</p>",
+        },
+      });
+
+      expect(isError(result)).toBe(true);
+      expect(firstText(result)).toContain("400");
+      expect(firstText(result)).toContain("resource_type");
+    });
+  });
+
+  describe("update_document_section", () => {
+    it("PATCHes the section with the new content", async () => {
+      const client = await connectSectionsClient();
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({
+          data: {
+            id: "1002",
+            type: "document-sections",
+            attributes: { content: "<p>Updated.</p>" },
+          },
+        })
+      );
+
+      const result = await client.callTool({
+        name: "update_document_section",
+        arguments: {
+          document_id: 789,
+          section_id: 1002,
+          content: "<p>Updated.</p>",
+        },
+      });
+
+      const { url, init } = requestOf();
+      expect(url).toBe(
+        "https://api.itglue.com/documents/789/relationships/sections/1002"
+      );
+      expect(init.method).toBe("PATCH");
+      expect(bodyOf()).toEqual({
+        data: {
+          type: "document-sections",
+          attributes: { content: "<p>Updated.</p>" },
+        },
+      });
+      expect(firstText(result)).toContain("Updated.");
+    });
+
+    it("requires document_id, section_id and content", async () => {
+      const client = await connectSectionsClient();
+      const result = await client.callTool({
+        name: "update_document_section",
+        arguments: { document_id: 789, section_id: 1002 },
+      });
+
+      expect(isError(result)).toBe(true);
+      expect(firstText(result)).toContain(
+        "document_id, section_id, and content are required"
+      );
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("delete_document_section", () => {
+    it("DELETEs the section and confirms by id", async () => {
+      const client = await connectSectionsClient();
+      mockFetch.mockResolvedValueOnce(createMockResponse(null, 204));
+
+      const result = await client.callTool({
+        name: "delete_document_section",
+        arguments: { document_id: 789, section_id: 1002 },
+      });
+
+      const { url, init } = requestOf();
+      expect(url).toBe(
+        "https://api.itglue.com/documents/789/relationships/sections/1002"
+      );
+      expect(init.method).toBe("DELETE");
+      expect(isError(result)).toBe(false);
+      expect(firstText(result)).toContain("Section 1002 deleted successfully");
+    });
+
+    it("requires document_id and section_id", async () => {
+      const client = await connectSectionsClient();
+      const result = await client.callTool({
+        name: "delete_document_section",
+        arguments: { document_id: 789 },
+      });
+
+      expect(isError(result)).toBe(true);
+      expect(firstText(result)).toContain(
+        "document_id and section_id are required"
+      );
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("publish_document", () => {
+    // POST /documents/:id/publish returns 404 — the verb is load-bearing.
+    it("PATCHes /documents/:id/publish", async () => {
+      const client = await connectSectionsClient();
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({
+          data: {
+            id: "789",
+            type: "documents",
+            attributes: { name: "My Doc", published: true },
+          },
+        })
+      );
+
+      const result = await client.callTool({
+        name: "publish_document",
+        arguments: { document_id: 789 },
+      });
+
+      const { url, init } = requestOf();
+      expect(url).toBe("https://api.itglue.com/documents/789/publish");
+      expect(init.method).toBe("PATCH");
+      expect(firstText(result)).toContain("My Doc");
+    });
+
+    it("requires document_id", async () => {
+      const client = await connectSectionsClient();
+      const result = await client.callTool({
+        name: "publish_document",
+        arguments: {},
+      });
+
+      expect(isError(result)).toBe(true);
+      expect(firstText(result)).toContain("document_id is required");
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("archive_document / unarchive_document", () => {
+    // Pins the URL, verb and payload so a refactor can't silently omit
+    // `archived` or invent a non-existent /archive sub-endpoint.
+    it.each([
+      ["archive_document", true],
+      ["unarchive_document", false],
+    ])("%s PATCHes /documents/:id with archived=%s", async (tool, archived) => {
+      const client = await connectSectionsClient();
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({
+          data: { id: "789", type: "documents", attributes: { archived } },
+        })
+      );
+
+      await client.callTool({
+        name: tool as string,
+        arguments: { document_id: 789 },
+      });
+
+      const { url, init } = requestOf();
+      expect(url).toBe("https://api.itglue.com/documents/789");
+      expect(init.method).toBe("PATCH");
+      expect(bodyOf()).toEqual({
+        data: { type: "documents", attributes: { archived } },
+      });
+    });
+
+    it.each(["archive_document", "unarchive_document"])(
+      "%s requires document_id",
+      async (tool) => {
+        const client = await connectSectionsClient();
+        const result = await client.callTool({ name: tool, arguments: {} });
+
+        expect(isError(result)).toBe(true);
+        expect(firstText(result)).toContain("document_id is required");
+        expect(mockFetch).not.toHaveBeenCalled();
+      }
+    );
   });
 });
 

@@ -45,6 +45,7 @@ export {
   requestDocumentsWithFolderDefault,
   rootLevelDocumentsNote,
   stripDocumentBodies,
+  stripPasswordValues,
 } from "./mcp-server.js";
 export type {
   DocumentSearchAttempt,
