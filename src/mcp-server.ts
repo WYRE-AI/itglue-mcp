@@ -215,6 +215,39 @@ function apiErrorStatus(err: unknown): number | null {
   return match ? Number(match[1]) : null;
 }
 
+/**
+ * Record types that IT Glue accepts attachments on, as the plural path segment
+ * used by `/:resource_type/:resource_id/relationships/attachments`.
+ *
+ * Kept as an explicit list rather than a free-text string so a wrong path is
+ * rejected by the schema instead of returning a 404 from the API.
+ */
+export const ATTACHABLE_RESOURCE_TYPES = [
+  "checklists",
+  "checklist_templates",
+  "configurations",
+  "contacts",
+  "documents",
+  "domains",
+  "flexible_assets",
+  "locations",
+  "passwords",
+  "ssl_certificates",
+  "tickets",
+] as const;
+
+/**
+ * Rejects a base64 payload that still carries its data: URI prefix.
+ *
+ * IT Glue stores whatever it is given, so a prefixed string uploads "cleanly"
+ * and produces a corrupt file that only shows up when someone opens it. Cheaper
+ * to refuse it here than to debug a broken image later.
+ */
+function stripDataUriPrefix(content: string): string {
+  const match = content.match(/^data:[^;,]*;base64,(.*)$/s);
+  return match ? match[1] : content;
+}
+
 // Simple IT Glue client
 export class ITGlueClient {
   private readonly apiKey?: string;
@@ -1513,6 +1546,96 @@ export function createMcpServer(credentialOverrides?: GatewayCredentials): Serve
         },
       },
       {
+        name: "create_document_image",
+        description:
+          "Upload an image into an IT Glue document so it can be shown inline in the document body. " +
+          "Pass the file as base64 with no data: prefix. IT Glue's HTML sanitiser strips inline <svg> and " +
+          "rejects data: URIs in <img src>, so uploading the image first is the only way to get a picture " +
+          "into a document body. Call publish_document after editing sections to reference it.",
+        annotations: {
+          title: "Upload document image",
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: false,
+          openWorldHint: true,
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            document_id: {
+              type: "number",
+              description: "The document ID to upload the image into",
+            },
+            file_name: {
+              type: "string",
+              description: "File name including extension, e.g. 'architecture.png'",
+            },
+            content: {
+              type: "string",
+              description:
+                "Base64-encoded file contents. Raw base64 only - strip any 'data:image/png;base64,' prefix first.",
+            },
+          },
+          required: ["document_id", "file_name", "content"],
+        },
+      },
+      {
+        name: "create_attachment",
+        description:
+          "Attach a file to an IT Glue record. Unlike create_document_image this adds a downloadable " +
+          "attachment rather than an image in the document body. Pass the file as base64 with no data: prefix.",
+        annotations: {
+          title: "Create attachment",
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: false,
+          openWorldHint: true,
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            resource_type: {
+              type: "string",
+              enum: ATTACHABLE_RESOURCE_TYPES,
+              description: "The kind of record to attach the file to",
+            },
+            resource_id: {
+              type: "number",
+              description: "ID of the record to attach the file to",
+            },
+            file_name: {
+              type: "string",
+              description: "File name including extension, e.g. 'network-diagram.png'",
+            },
+            content: {
+              type: "string",
+              description:
+                "Base64-encoded file contents. Raw base64 only - strip any 'data:...;base64,' prefix first.",
+            },
+          },
+          required: ["resource_type", "resource_id", "file_name", "content"],
+        },
+      },
+      {
+        name: "list_attachments",
+        description: "List the files attached to an IT Glue record, with their download URLs.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            resource_type: {
+              type: "string",
+              enum: ATTACHABLE_RESOURCE_TYPES,
+              description: "The kind of record to list attachments for",
+            },
+            resource_id: {
+              type: "number",
+              description: "ID of the record to list attachments for",
+            },
+          },
+          required: ["resource_type", "resource_id"],
+        },
+      },
+      {
         name: "publish_document",
         description: "Publish an IT Glue document to make section changes visible. Always call this after creating, updating, or deleting sections.",
         inputSchema: {
@@ -2521,6 +2644,100 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         );
         return {
           content: [{ type: "text", text: `Section ${args.section_id} deleted successfully` }],
+        };
+      }
+
+      case "create_document_image": {
+        if (!args?.document_id || !args?.file_name || !args?.content) {
+          return {
+            content: [{ type: "text", text: "Error: document_id, file_name, and content are required" }],
+            isError: true,
+          };
+        }
+        const image = await client.post(
+          `/documents/${args.document_id}/relationships/document_images`,
+          {
+            data: {
+              type: "document_images",
+              attributes: {
+                image: {
+                  content: stripDataUriPrefix(args.content as string),
+                  file_name: args.file_name,
+                },
+              },
+            },
+          }
+        );
+        return {
+          content: [{ type: "text", text: JSON.stringify(image, null, 2) }],
+        };
+      }
+
+      case "create_attachment": {
+        if (!args?.resource_type || !args?.resource_id || !args?.file_name || !args?.content) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "Error: resource_type, resource_id, file_name, and content are required",
+              },
+            ],
+            isError: true,
+          };
+        }
+        if (!ATTACHABLE_RESOURCE_TYPES.includes(args.resource_type as typeof ATTACHABLE_RESOURCE_TYPES[number])) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Error: resource_type must be one of ${ATTACHABLE_RESOURCE_TYPES.join(", ")}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+        const attachment = await client.post(
+          `/${args.resource_type}/${args.resource_id}/relationships/attachments`,
+          {
+            data: {
+              type: "attachments",
+              attributes: {
+                attachment: {
+                  content: stripDataUriPrefix(args.content as string),
+                  file_name: args.file_name,
+                },
+              },
+            },
+          }
+        );
+        return {
+          content: [{ type: "text", text: JSON.stringify(attachment, null, 2) }],
+        };
+      }
+
+      case "list_attachments": {
+        if (!args?.resource_type || !args?.resource_id) {
+          return {
+            content: [{ type: "text", text: "Error: resource_type and resource_id are required" }],
+            isError: true,
+          };
+        }
+        if (!ATTACHABLE_RESOURCE_TYPES.includes(args.resource_type as typeof ATTACHABLE_RESOURCE_TYPES[number])) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Error: resource_type must be one of ${ATTACHABLE_RESOURCE_TYPES.join(", ")}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+        const attachments = await client.get(
+          `/${args.resource_type}/${args.resource_id}/relationships/attachments`
+        );
+        return {
+          content: [{ type: "text", text: JSON.stringify(attachments, null, 2) }],
         };
       }
 

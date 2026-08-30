@@ -114,6 +114,12 @@ If you do need the JWT fallback, provide it in whichever way matches your deploy
 - **search_documents** - Search for documents with filtering by organization, name, or folder. Defaults to a folder-inclusive listing (each result carries its `documentFolderId`), degrading gracefully to a root-only listing on tenants whose API rejects the folder filter
 - **get_document** - Get a specific document by ID, including its sectioned body. Renders as an interactive card in MCP Apps hosts — see [Interactive Document Card](#interactive-document-card-mcp-apps)
 - **list_document_folders** - List an organization's document folders (names and IDs). Works with an API key on tenants where IT Glue exposes the Document Folders resource; falls back to a JWT otherwise — see [JWT fallback for document-folder operations](#jwt-fallback-for-document-folder-operations)
+- **create_document_image** - Upload an image into a document so it can be shown inline in the body. Base64 in, no multipart needed. See [Images in documents](#images-in-documents)
+
+### Attachments
+
+- **create_attachment** - Attach a file to a checklist, checklist template, configuration, contact, document, domain, flexible asset, location, password, SSL certificate or ticket. Base64 in
+- **list_attachments** - List a record's attachments, with their download URLs
 
 ### Flexible Assets
 
@@ -147,6 +153,34 @@ hosts. The card is read-only — neutral by default, brandable via
 `window.__BRAND__` injection or `MCP_BRAND_*` env vars (`MCP_BRAND_NAME`,
 `MCP_BRAND_LOGO_URL`, `MCP_BRAND_PRIMARY_COLOR`, `MCP_BRAND_ACCENT_COLOR`,
 `MCP_BRAND_BG`, `MCP_BRAND_TEXT`) — no rebuild needed.
+
+### Images in documents
+
+IT Glue's HTML sanitiser is strict about how a picture gets into a document
+body, and fails two of three ways (verified live against `api.itglue.com`,
+2026-08-31):
+
+| What you try | What happens |
+|---|---|
+| Inline `<svg>` in section HTML | **Silently stripped.** The section saves, returns 200, and the diagram is simply gone from the stored content |
+| `<img src="data:image/png;base64,…">` | **Rejected with a 500**, not a validation error |
+| `<img src="https://…">` | Accepted and preserved |
+
+So the only route to an image in a document body is to upload the file first and
+reference the URL IT Glue gives back — which is what `create_document_image`
+does. The inline-SVG case is the one worth knowing about, because it looks like
+a successful write.
+
+```
+create_document_image(document_id, file_name, content)   # content = raw base64
+→ reference the returned URL from an <img src> in update_document_section
+→ publish_document
+```
+
+Pass **raw base64**. If a `data:...;base64,` prefix is left on the front the
+tool strips it rather than passing it through: IT Glue stores whatever it is
+given, so a prefixed payload uploads "successfully" and produces a corrupt file
+that only surfaces when somebody opens it.
 
 ## Usage with Claude Code
 
