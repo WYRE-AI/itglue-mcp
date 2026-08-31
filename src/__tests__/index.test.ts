@@ -354,6 +354,9 @@ describe("Tool Definitions", () => {
     { name: "create_document_section", requiredFields: ["document_id", "section_type", "content"], properties: ["document_id", "section_type", "content"] },
     { name: "update_document_section", requiredFields: ["document_id", "section_id", "content"], properties: ["document_id", "section_id", "content"] },
     { name: "delete_document_section", requiredFields: ["document_id", "section_id"], properties: ["document_id", "section_id"] },
+    { name: "create_document_image", requiredFields: ["document_id", "file_name", "content"], properties: ["document_id", "file_name", "content"] },
+    { name: "create_attachment", requiredFields: ["resource_type", "resource_id", "file_name", "content"], properties: ["resource_type", "resource_id", "file_name", "content"] },
+    { name: "list_attachments", requiredFields: ["resource_type", "resource_id"], properties: ["resource_type", "resource_id"] },
     { name: "publish_document", requiredFields: ["document_id"], properties: ["document_id"] },
     { name: "archive_document", requiredFields: ["document_id"], properties: ["document_id"] },
     { name: "unarchive_document", requiredFields: ["document_id"], properties: ["document_id"] },
@@ -375,7 +378,7 @@ describe("Tool Definitions", () => {
   });
 
   it("should have 25 tools total", () => {
-    expect(tools.length).toBe(25);
+    expect(tools.length).toBe(28);
   });
 });
 
@@ -1110,7 +1113,7 @@ describe("Unknown Tool Handling", () => {
     const client = await connectClient();
     const { tools } = await client.listTools();
 
-    expect(tools.length).toBe(25);
+    expect(tools.length).toBe(28);
     // Every advertised tool must reach a real branch — not the Unknown-tool
     // default — so a rename in the ListTools block can't drift from the switch.
     for (const tool of tools) {
@@ -1627,7 +1630,7 @@ describe("Locations tools (round-trip)", () => {
   it("exposes 25 tools total", async () => {
     const client = await connectLocationsClient();
     const { tools } = await client.listTools();
-    expect(tools.length).toBe(25);
+    expect(tools.length).toBe(28);
   });
 
   it("search_locations queries /locations filtered by organization and city", async () => {
@@ -2830,6 +2833,153 @@ describe("Document section tools (round-trip)", () => {
         "document_id, section_id, and content are required"
       );
       expect(mockFetch).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("create_document_image", () => {
+    it("POSTs base64 content to the document's document_images relationship", async () => {
+      const client = await connectSectionsClient();
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({
+          data: {
+            id: "5001",
+            type: "document_images",
+            attributes: { "file-name": "architecture.png" },
+          },
+        })
+      );
+
+      await client.callTool({
+        name: "create_document_image",
+        arguments: {
+          document_id: 789,
+          file_name: "architecture.png",
+          content: "aGVsbG8=",
+        },
+      });
+
+      const { url, init } = requestOf();
+      expect(url).toBe(
+        "https://api.itglue.com/documents/789/relationships/document_images"
+      );
+      expect(init.method).toBe("POST");
+
+      const body = bodyOf() as {
+        data: { type: string; attributes: { image: Record<string, unknown> } };
+      };
+      expect(body.data.type).toBe("document_images");
+      expect(body.data.attributes.image.content).toBe("aGVsbG8=");
+      expect(body.data.attributes.image.file_name).toBe("architecture.png");
+    });
+
+    // IT Glue stores whatever it is given, so a data: prefix left on the front
+    // uploads without complaint and yields a corrupt file that only surfaces
+    // when somebody opens it.
+    it("strips a data: URI prefix rather than storing a corrupt file", async () => {
+      const client = await connectSectionsClient();
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({ data: { id: "5002", type: "document_images" } })
+      );
+
+      await client.callTool({
+        name: "create_document_image",
+        arguments: {
+          document_id: 789,
+          file_name: "diagram.png",
+          content: "data:image/png;base64,aGVsbG8=",
+        },
+      });
+
+      const body = bodyOf() as {
+        data: { attributes: { image: Record<string, unknown> } };
+      };
+      expect(body.data.attributes.image.content).toBe("aGVsbG8=");
+    });
+
+    it("requires document_id, file_name and content", async () => {
+      const client = await connectSectionsClient();
+      const result = await client.callTool({
+        name: "create_document_image",
+        arguments: { document_id: 789 },
+      });
+
+      expect(isError(result)).toBe(true);
+      expect(firstText(result)).toContain("required");
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("create_attachment", () => {
+    it("POSTs to the resource's attachments relationship", async () => {
+      const client = await connectSectionsClient();
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({
+          data: { id: "6001", type: "attachments", attributes: { "file-name": "runbook.pdf" } },
+        })
+      );
+
+      await client.callTool({
+        name: "create_attachment",
+        arguments: {
+          resource_type: "configurations",
+          resource_id: 4242,
+          file_name: "runbook.pdf",
+          content: "aGVsbG8=",
+        },
+      });
+
+      const { url, init } = requestOf();
+      expect(url).toBe(
+        "https://api.itglue.com/configurations/4242/relationships/attachments"
+      );
+      expect(init.method).toBe("POST");
+
+      const body = bodyOf() as {
+        data: { type: string; attributes: { attachment: Record<string, unknown> } };
+      };
+      expect(body.data.type).toBe("attachments");
+      expect(body.data.attributes.attachment.content).toBe("aGVsbG8=");
+      expect(body.data.attributes.attachment.file_name).toBe("runbook.pdf");
+    });
+
+    it("rejects a resource_type IT Glue does not accept attachments on", async () => {
+      const client = await connectSectionsClient();
+      const result = await client.callTool({
+        name: "create_attachment",
+        arguments: {
+          resource_type: "organizations",
+          resource_id: 1,
+          file_name: "x.png",
+          content: "aGVsbG8=",
+        },
+      });
+
+      expect(isError(result)).toBe(true);
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("list_attachments", () => {
+    it("GETs the resource's attachments relationship", async () => {
+      const client = await connectSectionsClient();
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse(
+          createJsonApiResponse([
+            { id: "6001", type: "attachments", attributes: { "file-name": "runbook.pdf" } },
+          ])
+        )
+      );
+
+      await client.callTool({
+        name: "list_attachments",
+        arguments: { resource_type: "documents", resource_id: 789 },
+      });
+
+      const { url, init } = requestOf();
+      expect(url).toContain(
+        "https://api.itglue.com/documents/789/relationships/attachments"
+      );
+      expect(init.method ?? "GET").toBe("GET");
     });
   });
 
