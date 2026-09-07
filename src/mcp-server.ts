@@ -1546,44 +1546,11 @@ export function createMcpServer(credentialOverrides?: GatewayCredentials): Serve
         },
       },
       {
-        name: "create_document_image",
-        description:
-          "Upload an image into an IT Glue document so it can be shown inline in the document body. " +
-          "Pass the file as base64 with no data: prefix. IT Glue's HTML sanitiser strips inline <svg> and " +
-          "rejects data: URIs in <img src>, so uploading the image first is the only way to get a picture " +
-          "into a document body. Call publish_document after editing sections to reference it.",
-        annotations: {
-          title: "Upload document image",
-          readOnlyHint: false,
-          destructiveHint: false,
-          idempotentHint: false,
-          openWorldHint: true,
-        },
-        inputSchema: {
-          type: "object",
-          properties: {
-            document_id: {
-              type: "number",
-              description: "The document ID to upload the image into",
-            },
-            file_name: {
-              type: "string",
-              description: "File name including extension, e.g. 'architecture.png'",
-            },
-            content: {
-              type: "string",
-              description:
-                "Base64-encoded file contents. Raw base64 only - strip any 'data:image/png;base64,' prefix first.",
-            },
-          },
-          required: ["document_id", "file_name", "content"],
-        },
-      },
-      {
         name: "create_attachment",
         description:
-          "Attach a file to an IT Glue record. Unlike create_document_image this adds a downloadable " +
-          "attachment rather than an image in the document body. Pass the file as base64 with no data: prefix.",
+          "Attach a file to an IT Glue record, and the only supported way to get a picture into a " +
+          "document body: upload here, then reference the returned downloadUrl from an <img src>. " +
+          "Pass the file as base64 with no data: prefix.",
         annotations: {
           title: "Create attachment",
           readOnlyHint: false,
@@ -2644,32 +2611,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         );
         return {
           content: [{ type: "text", text: `Section ${args.section_id} deleted successfully` }],
-        };
-      }
-
-      case "create_document_image": {
-        if (!args?.document_id || !args?.file_name || !args?.content) {
-          return {
-            content: [{ type: "text", text: "Error: document_id, file_name, and content are required" }],
-            isError: true,
-          };
-        }
-        const image = await client.post(
-          `/documents/${args.document_id}/relationships/document_images`,
-          {
-            data: {
-              type: "document_images",
-              attributes: {
-                image: {
-                  content: stripDataUriPrefix(args.content as string),
-                  file_name: args.file_name,
-                },
-              },
-            },
-          }
-        );
-        return {
-          content: [{ type: "text", text: JSON.stringify(image, null, 2) }],
         };
       }
 

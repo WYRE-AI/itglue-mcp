@@ -114,11 +114,10 @@ If you do need the JWT fallback, provide it in whichever way matches your deploy
 - **search_documents** - Search for documents with filtering by organization, name, or folder. Defaults to a folder-inclusive listing (each result carries its `documentFolderId`), degrading gracefully to a root-only listing on tenants whose API rejects the folder filter
 - **get_document** - Get a specific document by ID, including its sectioned body. Renders as an interactive card in MCP Apps hosts — see [Interactive Document Card](#interactive-document-card-mcp-apps)
 - **list_document_folders** - List an organization's document folders (names and IDs). Works with an API key on tenants where IT Glue exposes the Document Folders resource; falls back to a JWT otherwise — see [JWT fallback for document-folder operations](#jwt-fallback-for-document-folder-operations)
-- **create_document_image** - Upload an image into a document so it can be shown inline in the body. Base64 in, no multipart needed. See [Images in documents](#images-in-documents)
 
 ### Attachments
 
-- **create_attachment** - Attach a file to a checklist, checklist template, configuration, contact, document, domain, flexible asset, location, password, SSL certificate or ticket. Base64 in
+- **create_attachment** - Attach a file to a checklist, checklist template, configuration, contact, document, domain, flexible asset, location, password, SSL certificate or ticket. Base64 in. Also the only supported route to a picture in a document body — see [Images in documents](#images-in-documents)
 - **list_attachments** - List a record's attachments, with their download URLs
 
 ### Flexible Assets
@@ -156,26 +155,36 @@ hosts. The card is read-only — neutral by default, brandable via
 
 ### Images in documents
 
-IT Glue's HTML sanitiser is strict about how a picture gets into a document
-body, and fails two of three ways (verified live against `api.itglue.com`,
-2026-08-31):
+Getting a picture into a document body is attachment-shaped, not image-shaped.
+Verified live against `api.itglue.com`, 2026-08-31:
 
 | What you try | What happens |
 |---|---|
 | Inline `<svg>` in section HTML | **Silently stripped.** The section saves, returns 200, and the diagram is simply gone from the stored content |
 | `<img src="data:image/png;base64,…">` | **Rejected with a 500**, not a validation error |
-| `<img src="https://…">` | Accepted and preserved |
+| `POST /documents/{id}/relationships/document_images` | **404** |
+| Upload an attachment, then `<img src="https://…/attachments/{id}">` | Works, and renders inline |
 
-So the only route to an image in a document body is to upload the file first and
-reference the URL IT Glue gives back — which is what `create_document_image`
-does. The inline-SVG case is the one worth knowing about, because it looks like
-a successful write.
+A caveat on that 404, because it is easy to over-read. Document images are a
+real resource — the IT Glue web editor creates them, storing a *relative* path
+like `/{org_id}/docs/{doc_id}/images/{image_id}` in the section HTML which the
+renderer swaps for a signed S3 URL on read. What could not be found is a route
+on the **documented public API** to create one; the editor appears to use an
+internal endpoint. So the right reading is "no public-API image upload route
+found", not "document images do not exist".
+
+Hence `create_attachment`: upload the file, then reference the `downloadUrl` it
+returns. The inline-SVG case is the one worth knowing about, because it looks
+like a successful write.
 
 ```
-create_document_image(document_id, file_name, content)   # content = raw base64
-→ reference the returned URL from an <img src> in update_document_section
+create_attachment(resource_type="documents", resource_id, file_name, content)
+→ reference the returned downloadUrl from an <img src> in update_document_section
 → publish_document
 ```
+
+Note the sanitiser also drops some inline style properties (`max-width` among
+them), so size the image to the width you want rather than relying on CSS.
 
 Pass **raw base64**. If a `data:...;base64,` prefix is left on the front the
 tool strips it rather than passing it through: IT Glue stores whatever it is
