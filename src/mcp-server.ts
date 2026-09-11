@@ -85,6 +85,31 @@ export const USER_METRIC_SORT_FIELDS = [
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
+ * Largest `page[size]` the IT Glue API accepts. Anything above this is
+ * rejected by the server, so an over-large request is a failed call rather
+ * than a big page.
+ */
+export const MAX_PAGE_SIZE = 1000;
+
+/**
+ * Clamp a caller-supplied `page[size]` into the range IT Glue accepts.
+ *
+ * Every tool advertises "max 1000" in its schema, but a schema description is
+ * a hint, not a constraint — nothing stopped a model from asking for 5000 and
+ * getting an opaque API error back. Clamping here, at the single point where
+ * `page[size]` is serialised onto the query string, means no call site can
+ * bypass it (including the folder picker's hard-coded 1000).
+ *
+ * Returns `null` for values that aren't a usable page size, so the caller
+ * omits the parameter and lets IT Glue apply its own default.
+ */
+export function clampPageSize(size: unknown): number | null {
+  const n = Number(size);
+  if (!Number.isFinite(n) || n < 1) return null;
+  return Math.min(Math.floor(n), MAX_PAGE_SIZE);
+}
+
+/**
  * Maximum end-minus-start difference IT Glue accepts on `filter[date]`.
  *
  * Verified live 2026-08-06 against api.itglue.com by bisection:
@@ -309,7 +334,8 @@ export class ITGlueClient {
         }
       } else if (key === "page" && typeof value === "object") {
         const pageObj = value as { size?: number; number?: number };
-        if (pageObj.size) searchParams.append("page[size]", String(pageObj.size));
+        const size = clampPageSize(pageObj.size);
+        if (size !== null) searchParams.append("page[size]", String(size));
         if (pageObj.number) searchParams.append("page[number]", String(pageObj.number));
       } else if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
         searchParams.append(key, String(value));
@@ -848,7 +874,13 @@ export async function listDocumentFoldersViaApiKey(
   }
 
   // The relationship path 404'd — the tenant may expose the public resource
-  // only at the top level.
+  // only at the top level. Note this second path is a probe, not a contract:
+  // the developer docs document the nested
+  // `/organizations/:id/relationships/document_folders` routes and a top-level
+  // bulk `PATCH /document_folders`, but no top-level GET index. It is tried
+  // only after the documented route 404s, and any 401/403/404 here returns
+  // null so the caller falls through to the honest JWT-fallback message rather
+  // than surfacing an API error.
   try {
     return await client.request("/document_folders", {
       ...params,

@@ -31,6 +31,8 @@ export {
   createMcpServer,
   createClient,
   cleanCredential,
+  clampPageSize,
+  MAX_PAGE_SIZE,
   getCredentialsFromEnv,
   sanitizeCredentials,
   ITGlueClient,
