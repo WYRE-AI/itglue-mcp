@@ -22,8 +22,10 @@ vi.stubGlobal("fetch", mockFetch);
 import {
   buildUserMetricsDateFilter,
   buildFolderPickerOptions,
+  clampPageSize,
   cleanCredential,
   createClient,
+  MAX_PAGE_SIZE,
   createDocumentWithContent,
   createMcpServer,
   folderedDocumentsIncludedNote,
@@ -1494,6 +1496,50 @@ describe("Query String Building", () => {
   });
 });
 
+describe("page[size] clamping", () => {
+  it("exposes 1000 as the documented IT Glue maximum", () => {
+    expect(MAX_PAGE_SIZE).toBe(1000);
+  });
+
+  it("passes through sizes within range", () => {
+    expect(clampPageSize(1)).toBe(1);
+    expect(clampPageSize(50)).toBe(50);
+    expect(clampPageSize(1000)).toBe(1000);
+  });
+
+  it("clamps anything above the maximum down to it", () => {
+    expect(clampPageSize(1001)).toBe(1000);
+    expect(clampPageSize(5000)).toBe(1000);
+    expect(clampPageSize(Number.MAX_SAFE_INTEGER)).toBe(1000);
+  });
+
+  it("floors fractional sizes so the query string stays an integer", () => {
+    expect(clampPageSize(10.9)).toBe(10);
+  });
+
+  it("returns null for values that are not a usable page size", () => {
+    // null means "omit page[size] and let IT Glue apply its own default",
+    // which is friendlier than sending page[size]=0 or page[size]=NaN.
+    expect(clampPageSize(0)).toBeNull();
+    expect(clampPageSize(-1)).toBeNull();
+    expect(clampPageSize(undefined)).toBeNull();
+    expect(clampPageSize(null)).toBeNull();
+    expect(clampPageSize("not a number")).toBeNull();
+    expect(clampPageSize(Number.NaN)).toBeNull();
+    expect(clampPageSize(Number.POSITIVE_INFINITY)).toBeNull();
+  });
+
+  it("applies the clamp on the outbound query string, not just at the tool boundary", async () => {
+    mockFetch.mockClear();
+    mockFetch.mockResolvedValueOnce(createMockResponse(createJsonApiResponse([])));
+    const client = createClient({ apiKey: "k", region: "us" });
+    await client.request("/organizations", { page: { size: 9999, number: 1 } });
+
+    const url = decodeURIComponent(mockFetch.mock.calls[0][0] as string);
+    expect(url).toContain("page[size]=1000");
+  });
+});
+
 describe("MCP Response Format", () => {
   it("should format successful response with text content", () => {
     const data = { id: "123", name: "Test" };
@@ -2205,6 +2251,25 @@ describe("Core tools (round-trip)", () => {
       expect(url).toContain("sort=-name");
       expect(url).toContain("page[size]=25");
       expect(url).toContain("page[number]=2");
+    });
+
+    it("clamps an over-large page_size to the API maximum instead of forwarding it", async () => {
+      const client = await connectCoreClient();
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse(createJsonApiResponse([]))
+      );
+
+      await client.callTool({
+        name: "search_organizations",
+        arguments: { name: "Acme", page_size: 5000 },
+      });
+
+      // Tool schemas advertise "max 1000", but a description is only a hint.
+      // Without the clamp this went out as page[size]=5000 and IT Glue
+      // rejected the whole call.
+      const url = decodedUrl();
+      expect(url).toContain("page[size]=1000");
+      expect(url).not.toContain("page[size]=5000");
     });
 
     it("sends the API key and JSON:API headers on the handler's own request", async () => {

@@ -53,6 +53,55 @@
     (`expected 'tenant-B' to be 'tenant-A'`) against a reinstated
     module-singleton implementation, and to pass against the ALS-based fix.
 
+- **Cross-tenant credential leakage (gateway mode) is now pinned shut by a
+  regression test.** The leak itself was real in this server and was fixed in
+  `889c6dd`, first released in v1.5.4: in gateway mode
+  (`AUTH_MODE=gateway`) the Node HTTP entrypoint carried each request's
+  credentials by *mutating `process.env`* —
+  `process.env.ITGLUE_API_KEY = <X-ITGlue-API-Key header>`, plus
+  `ITGLUE_BASE_URL` and `ITGLUE_REGION` — and then called `createMcpServer()`,
+  whose `CallToolRequestSchema` handler resolved credentials via
+  `getCredentialsFromEnv()`. `process.env` is process-global and a Node HTTP
+  server interleaves concurrent requests, so two MSP customers hitting the same
+  container could race through that global: tenant B's headers overwrote the
+  environment while tenant A's request was still in flight, and A's tool call
+  then authenticated — and returned data — against **B's IT Glue tenant**. The
+  region and base URL leaked with the key, so a misrouted call could also cross
+  a data-residency boundary (a US tenant's query issued against
+  `api.eu.itglue.com`). The fix passed credentials as an argument —
+  `createMcpServer(credentialOverrides)` — captured in that per-request server
+  instance's closure, with no shared mutable credential state.
+  - **What changed now:** that fix shipped without a test, so nothing stopped a
+    later refactor from reintroducing it. `src/__tests__/credential-isolation.test.ts`
+    adds three regression tests that force a deterministic hostile interleave
+    (a manually-resolved gate promise, not a timing stagger) in which one
+    tenant's entire request runs to completion inside another tenant's `await`
+    gap, and assert **by value** which credential went out on which outbound
+    request, with explicit negative cross-checks against both the other
+    tenant's credential and an ambient `process.env` value. Coverage: API key
+    and region isolation under a forced interleave; JWT isolation (the JWT is
+    the higher-privilege credential — it overrides the API key in
+    `authHeaders`, so a JWT crossing tenants is the worst version of this bug);
+    and per-instance credential resolution across three servers built up front
+    and invoked out of construction order.
+  - **Verified to fail against the bug, not merely to pass against the fix.**
+    With the pre-`889c6dd` shape reinstated (handler resolving
+    `getCredentialsFromEnv()` instead of the passed credentials), all three
+    fail with the exact leak signature —
+    `expected 'env-fallback-key' to be 'tenant-a-key'`. Independently, hoisting
+    the `sessionJwt` slot out of the `createMcpServer` closure to module scope
+    (the other way this bug can return, since that slot is mutated by the JWT
+    elicitation path) fails the JWT test with two outbound requests carrying a
+    JWT where only one tenant supplied one. Both mutations were reverted; the
+    suite is green.
+  - Reported and fixed independently by @KameronTT and @DDePuy2015 in their
+    forks of itglue-mcp. Their forks each found this leakage class on their
+    own; that is what prompted this audit, which confirmed the fix was already
+    present here but untested, and which produced the `page[size]` clamp below.
+    The same pass documented the already-merged `create_document_image` removal
+    (#99, contributed by @granthartley-brown), which had landed without a
+    changelog entry despite being a breaking change for callers.
+
 ### Changed
 
 - **API-key-first document folder access (JWT now an optional fallback):**
@@ -122,6 +171,24 @@
   (org-scoped, with the same "search by org name" elicitation fallback) and
   filters by name, city, region, or country; the write tools accept the full
   address/phone field set. API-key scope is sufficient — no JWT required.
+
+### Removed
+
+- **BREAKING: the `create_document_image` tool is gone.** It shipped in
+  [#97](https://github.com/wyre-technology/itglue-mcp/pull/97) wrapping
+  `POST /documents/{id}/relationships/document_images`. That path was inferred
+  rather than confirmed and returns 404 against the public IT Glue API, so the
+  tool could never have succeeded — every call failed. It was removed in
+  [#99](https://github.com/wyre-technology/itglue-mcp/pull/99) rather than left
+  advertised in `tools/list` as a tool that always errors. **If you call
+  `create_document_image`, that call now returns
+  `Unknown tool: create_document_image` instead of a 404.** There is no replacement: document images are a real IT Glue
+  resource (the web editor creates them, storing a relative
+  `/{org_id}/docs/{doc_id}/images/{image_id}` path in the section HTML that the
+  renderer swaps for a signed S3 URL on read), but the editor appears to use an
+  internal endpoint — no route on the documented public API creates one. Use
+  `create_attachment` for file attachments, or reference externally-hosted
+  images by absolute URL in document section HTML.
 
 ### Fixed
 
@@ -251,6 +318,29 @@
   packages) without a 401 from `npm.pkg.github.com`. Note: unlike the other Wyre
   MCP servers, this one has no private runtime SDK dependency, so the one-click
   deploy buttons were never affected by the build-time 401.
+- **An over-large `page_size` failed the whole call instead of being clamped.**
+  Every paginated tool advertises "max 1000" in its input schema, but a schema
+  description is a hint, not a constraint — nothing stopped a model from asking
+  for `page_size: 5000`, which went out as `page[size]=5000` and was rejected by
+  IT Glue, so the caller got an opaque API error rather than a large page.
+  `page[size]` is now clamped by `clampPageSize()` at the single point where it
+  is serialised onto the query string (`ITGlueClient.request`), so no call site
+  can bypass it — including `create_document`'s folder picker, which hard-codes
+  1000. Values above `MAX_PAGE_SIZE` (1000) clamp down to it and fractional
+  values floor to an integer; values that are not a usable page size (0,
+  negative, `NaN`, `Infinity`, non-numeric, absent) now omit the parameter
+  entirely so IT Glue applies its own default. The previous truthiness check
+  (`if (pageObj.size)`) already dropped `0` and `NaN`, but forwarded negatives,
+  `Infinity`, non-numeric values, and fractional sizes verbatim. `clampPageSize`
+  and `MAX_PAGE_SIZE` are exported for callers that want the same bound.
+- **`list_document_folders`' undocumented second lookup path is now labelled as
+  a probe.** The fallback to a top-level `GET /document_folders` is not a
+  documented route — the developer docs describe the nested
+  `/organizations/:id/relationships/document_folders` routes and a top-level
+  bulk `PATCH`, but no top-level GET index. It is attempted only after the
+  documented route 404s, and any 401/403/404 from it returns `null` so the
+  caller falls through to the honest JWT-fallback message rather than surfacing
+  an API error. Comment only; no behaviour change.
 
 ## [1.5.3](https://github.com/wyre-technology/itglue-mcp/compare/v1.5.2...v1.5.3) (2026-04-07)
 
