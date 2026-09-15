@@ -968,6 +968,12 @@ export function createMcpServer(credentialOverrides?: GatewayCredentials): Serve
         tools: {},
         prompts: {},
         resources: {},
+        // MCP Apps (SEP-1865): explicitly declare the extension capability so
+        // clients can negotiate UI support without inferring it from the
+        // presence of ui:// resources (SEP-1724 extensions mechanism).
+        extensions: {
+          "io.modelcontextprotocol/ui": {},
+        },
       },
     }
   );
@@ -2314,8 +2320,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const card = await buildDocumentCard(payload, client);
         if (card) payload._card = card;
 
+        // MCP Apps (SEP-1865): the model-facing content is a short text
+        // summary; the full JSON payload (including _card) lives in
+        // structuredContent so it isn't duplicated into the LLM context.
+        const docName =
+          typeof payload.name === "string" ? payload.name : `document ${args.id}`;
         return {
-          content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
+          content: [{ type: "text", text: `Retrieved document "${docName}".` }],
+          structuredContent: payload,
         };
       }
 

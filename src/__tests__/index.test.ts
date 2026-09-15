@@ -3253,16 +3253,18 @@ describe("Document folder access (API-key-first, round-trip)", () => {
         })
       );
 
-      const result = await client.callTool({
+      const result = (await client.callTool({
         name: "get_document",
         arguments: { organization_id: 8250506, id: 20022034 },
-      });
+      })) as { structuredContent?: Record<string, unknown> };
 
-      const text = firstText(result);
-      // The body the list tool omits is present here in full.
-      expect(text).toContain("FULL_BODY_MARKER");
-      expect(text).toContain('"content"');
-      expect(text).toContain("00-1 READ ME");
+      // The body the list tool omits is present here in full, now carried
+      // in structuredContent (SEP-1865 content/structuredContent split) —
+      // the text summary in `content` no longer JSON-dumps the payload.
+      const structured = result.structuredContent as Record<string, unknown>;
+      expect(JSON.stringify(structured)).toContain("FULL_BODY_MARKER");
+      expect(structured.content).toBeDefined();
+      expect(structured.name).toBe("00-1 READ ME");
       // Fetched from the single-document relationship endpoint.
       expect(decodedUrl(0)).toContain(
         "/organizations/8250506/relationships/documents/20022034"

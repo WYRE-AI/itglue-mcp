@@ -286,13 +286,21 @@ describe("MCP Apps document card", () => {
 
       expect(result.isError).toBeFalsy();
       expect(mockFetch).toHaveBeenCalledTimes(1); // embedded body → no sections refetch
-      const payload = JSON.parse(result.content[0].text);
-      // Model-visible payload unchanged apart from the additive _card.
-      expect(payload.name).toBe("Server Room Access Runbook");
-      expect(payload.content).toEqual([
+      // Model-facing content is now a short text summary (SEP-1865
+      // content/structuredContent split), not a JSON dump.
+      expect(result.content[0].text).toBe(
+        'Retrieved document "Server Room Access Runbook".'
+      );
+      const structured = (result as { structuredContent?: Record<string, unknown> })
+        .structuredContent as Record<string, unknown>;
+      expect(structured).toBeDefined();
+      // Full payload unchanged apart from the additive _card, now carried in
+      // structuredContent instead of the content JSON dump.
+      expect(structured.name).toBe("Server Room Access Runbook");
+      expect(structured.content).toEqual([
         { content: "<p>Badge in at the rear entrance.</p>" },
       ]);
-      expect(payload._card).toMatchObject({
+      expect(structured._card).toMatchObject({
         id: "9001",
         name: "Server Room Access Runbook",
         organization: "Acme Corp",
@@ -316,12 +324,16 @@ describe("MCP Apps document card", () => {
       const result = (await client.callTool({
         name: "get_document",
         arguments: { organization_id: 77, id: "9002" },
-      })) as { content: Array<{ text: string }>; isError?: boolean };
+      })) as {
+        content: Array<{ text: string }>;
+        structuredContent?: Record<string, unknown>;
+        isError?: boolean;
+      };
 
       expect(result.isError).toBeFalsy();
-      const payload = JSON.parse(result.content[0].text);
-      expect(payload.id).toBe("9002");
-      expect(payload._card).toBeUndefined();
+      const structured = result.structuredContent as Record<string, unknown>;
+      expect(structured.id).toBe("9002");
+      expect(structured._card).toBeUndefined();
     });
   });
 });
