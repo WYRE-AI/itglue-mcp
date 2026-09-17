@@ -14,11 +14,13 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
+  type CallToolResult,
 } from "@modelcontextprotocol/sdk/types.js";
 import { elicitSelection, elicitText } from "./utils/elicitation.js";
 import { registerPromptHandlers } from "./prompts.js";
 import { registerResourceHandlers } from "./resources.js";
 import { buildDocumentCard, DOCUMENT_CARD_META } from "./card.builder.js";
+import { applyUntrustedContentMarkers } from "./utils/untrusted-content.js";
 
 
 // IT Glue region configuration
@@ -1785,6 +1787,14 @@ let sessionJwt: string | undefined;
 
 // Handle tool calls
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  // Every case below returns from deep inside a switch, at very different
+  // points in the credential/elicitation setup — there is no single `return`
+  // at the end of this function to hook into. Running the whole handler as
+  // an IIFE and post-processing its settled result here instead gives
+  // untrusted-content marking one seam to wire into (see
+  // applyUntrustedContentMarkers / utils/untrusted-content.ts) without
+  // touching any individual case.
+  const result = await (async (): Promise<CallToolResult> => {
   const { name, arguments: args } = request.params;
   const credentials = credentialOverrides
     ? sanitizeCredentials(credentialOverrides)
@@ -2872,6 +2882,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       isError: true,
     };
   }
+  })();
+
+  return applyUntrustedContentMarkers(request.params.name, result);
 });
 
   return server;
