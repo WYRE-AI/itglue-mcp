@@ -9,7 +9,7 @@
  *   4. get_document attaches _card without changing the rest of the payload
  */
 
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // Mock fetch globally before importing the server factory.
 const mockFetch = vi.fn();
@@ -256,6 +256,18 @@ describe("MCP Apps document card", () => {
   });
 
   describe("get_document result", () => {
+    // get_document carries an untrusted-content marker by default (see
+    // utils/untrusted-content.ts) — its result is a document body, exactly
+    // the free text that module exists to label. These tests are about the
+    // _card mechanism, not the marker wrapper, so they opt out of it the
+    // same way any strict consumer would, and assert the raw JSON payload.
+    beforeEach(() => {
+      vi.stubEnv("ITGLUE_UNTRUSTED_MARKERS", "off");
+    });
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
     it("attaches _card while leaving the document payload unchanged", async () => {
       mockFetch.mockReset();
       // 1st call: the document itself (with its embedded sectioned body).
