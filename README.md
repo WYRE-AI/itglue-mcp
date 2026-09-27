@@ -96,6 +96,8 @@ If you do need the JWT fallback, provide it in whichever way matches your deploy
 
 - **search_configurations** - Search for configurations with filtering by organization, name, type, status, serial number, RMM ID, or PSA ID
 - **get_configuration** - Get a specific configuration by ID
+- **archive_configuration** - Archive a configuration (soft delete — hides it from normal views but keeps it recoverable). Reversible with `unarchive_configuration`. Configurations synced from a PSA/RMM integration (`psaIntegration: enabled` / `syncActive: true`) may be restored or updated by the next sync, so tidy up the source system (Autotask / Datto RMM) first
+- **unarchive_configuration** - Restore a previously archived configuration so it appears in normal views again
 
 ### Locations (Addresses/Sites)
 

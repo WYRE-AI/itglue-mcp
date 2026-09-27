@@ -1664,6 +1664,58 @@ export function createMcpServer(credentialOverrides?: GatewayCredentials): Serve
           required: ["document_id"],
         },
       },
+      {
+        name: "archive_configuration",
+        description:
+          "⚠ HIGH-IMPACT. Archives an IT Glue configuration (soft delete — hides it from normal " +
+          "views but keeps it recoverable). Use unarchive_configuration to restore. " +
+          "Configurations synced from a PSA or RMM integration (psaIntegration: enabled / " +
+          "syncActive: true on the record) may be restored or updated by the next sync, so tidy " +
+          "up the source system (Autotask / Datto RMM) first. Confirm with the user before invoking.",
+        annotations: {
+          title: "Archive configuration (reversible)",
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: true,
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            configuration_id: {
+              type: "number",
+              description: "The configuration ID to archive",
+            },
+          },
+          required: ["configuration_id"],
+        },
+      },
+      {
+        name: "unarchive_configuration",
+        description:
+          "⚠ HIGH-IMPACT. Restores a previously archived IT Glue configuration so it appears in " +
+          "normal views again. This makes the configuration visible to all users. " +
+          "Configurations synced from a PSA or RMM integration (psaIntegration: enabled / " +
+          "syncActive: true on the record) may be restored or updated by the next sync, so tidy " +
+          "up the source system (Autotask / Datto RMM) first. Confirm with the user before invoking.",
+        annotations: {
+          title: "Unarchive configuration (reversible)",
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: true,
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            configuration_id: {
+              type: "number",
+              description: "The configuration ID to unarchive",
+            },
+          },
+          required: ["configuration_id"],
+        },
+      },
       // Flexible Assets
       {
         name: "list_flexible_asset_types",
@@ -2711,6 +2763,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const result = await client.patch(`/documents/${args.document_id}`, {
           data: {
             type: "documents",
+            attributes: { archived },
+          },
+        });
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        };
+      }
+
+      case "archive_configuration":
+      case "unarchive_configuration": {
+        if (!args?.configuration_id) {
+          return {
+            content: [{ type: "text", text: "Error: configuration_id is required" }],
+            isError: true,
+          };
+        }
+        // IT Glue toggles archive state via PATCH /configurations/:id with the
+        // standard JSON:API document resource shape. There is no dedicated
+        // /archive sub-endpoint — only the `archived` boolean attribute.
+        const archived = name === "archive_configuration";
+        const result = await client.patch(`/configurations/${args.configuration_id}`, {
+          data: {
+            type: "configurations",
             attributes: { archived },
           },
         });

@@ -359,6 +359,8 @@ describe("Tool Definitions", () => {
     { name: "publish_document", requiredFields: ["document_id"], properties: ["document_id"] },
     { name: "archive_document", requiredFields: ["document_id"], properties: ["document_id"] },
     { name: "unarchive_document", requiredFields: ["document_id"], properties: ["document_id"] },
+    { name: "archive_configuration", requiredFields: ["configuration_id"], properties: ["configuration_id"] },
+    { name: "unarchive_configuration", requiredFields: ["configuration_id"], properties: ["configuration_id"] },
     { name: "search_flexible_assets", requiredFields: ["flexible_asset_type_id"], properties: ["flexible_asset_type_id", "organization_id", "name", "page_size", "page_number", "sort"] },
     { name: "list_flexible_asset_types", requiredFields: [], properties: ["organization_id"] },
     { name: "search_user_metrics", requiredFields: [] as string[], properties: ["user_id", "organization_id", "resource_type", "start_date", "end_date", "sort", "page_size", "page_number"] },
@@ -377,7 +379,7 @@ describe("Tool Definitions", () => {
   });
 
   it("should have 25 tools total", () => {
-    expect(tools.length).toBe(27);
+    expect(tools.length).toBe(29);
   });
 });
 
@@ -1112,7 +1114,7 @@ describe("Unknown Tool Handling", () => {
     const client = await connectClient();
     const { tools } = await client.listTools();
 
-    expect(tools.length).toBe(27);
+    expect(tools.length).toBe(29);
     // Every advertised tool must reach a real branch — not the Unknown-tool
     // default — so a rename in the ListTools block can't drift from the switch.
     for (const tool of tools) {
@@ -1629,7 +1631,7 @@ describe("Locations tools (round-trip)", () => {
   it("exposes 25 tools total", async () => {
     const client = await connectLocationsClient();
     const { tools } = await client.listTools();
-    expect(tools.length).toBe(27);
+    expect(tools.length).toBe(29);
   });
 
   it("search_locations queries /locations filtered by organization and city", async () => {
@@ -3017,6 +3019,62 @@ describe("Document section tools (round-trip)", () => {
         expect(isError(result)).toBe(true);
         expect(firstText(result)).toContain("document_id is required");
         expect(mockFetch).not.toHaveBeenCalled();
+      }
+    );
+  });
+
+  describe("archive_configuration / unarchive_configuration", () => {
+    // Pins the URL, verb and payload so a refactor can't silently omit
+    // `archived` or invent a non-existent /archive sub-endpoint.
+    it.each([
+      ["archive_configuration", true],
+      ["unarchive_configuration", false],
+    ])("%s PATCHes /configurations/:id with archived=%s", async (tool, archived) => {
+      const client = await connectSectionsClient();
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({
+          data: { id: "789", type: "configurations", attributes: { archived } },
+        })
+      );
+
+      await client.callTool({
+        name: tool as string,
+        arguments: { configuration_id: 789 },
+      });
+
+      const { url, init } = requestOf();
+      expect(url).toBe("https://api.itglue.com/configurations/789");
+      expect(init.method).toBe("PATCH");
+      expect(bodyOf()).toEqual({
+        data: { type: "configurations", attributes: { archived } },
+      });
+    });
+
+    it.each(["archive_configuration", "unarchive_configuration"])(
+      "%s requires configuration_id",
+      async (tool) => {
+        const client = await connectSectionsClient();
+        const result = await client.callTool({ name: tool, arguments: {} });
+
+        expect(isError(result)).toBe(true);
+        expect(firstText(result)).toContain("configuration_id is required");
+        expect(mockFetch).not.toHaveBeenCalled();
+      }
+    );
+
+    it.each(["archive_configuration", "unarchive_configuration"])(
+      "%s surfaces an IT Glue API error instead of reporting success",
+      async (tool) => {
+        const client = await connectSectionsClient();
+        mockFetch.mockResolvedValueOnce(createErrorResponse(404, "Not Found"));
+
+        const result = await client.callTool({
+          name: tool,
+          arguments: { configuration_id: 789 },
+        });
+
+        expect(isError(result)).toBe(true);
+        expect(firstText(result)).toContain("404");
       }
     );
   });
