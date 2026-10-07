@@ -218,6 +218,23 @@ function apiErrorStatus(err: unknown): number | null {
 }
 
 /**
+ * Coerce a tool argument to a positive integer.
+ *
+ * MCP hosts sometimes send numeric IDs as strings. Missing, blank, NaN,
+ * non-integer, zero, and negative values are rejected.
+ */
+function positiveInteger(value: unknown): number | undefined {
+  const numeric =
+    typeof value === "number"
+      ? value
+      : typeof value === "string" && value.trim() !== ""
+        ? Number(value)
+        : Number.NaN;
+  if (!Number.isInteger(numeric) || numeric <= 0) return undefined;
+  return numeric;
+}
+
+/**
  * Record types that IT Glue accepts attachments on, as the plural path segment
  * used by `/:resource_type/:resource_id/relationships/attachments`.
  *
@@ -427,15 +444,27 @@ export class ITGlueClient {
     return deserializeResource(resource) as T;
   }
 
-  async delete(path: string): Promise<void> {
+  /**
+   * Delete a resource. Resolves with no value.
+   *
+   * Most IT Glue deletes are path-addressed and take no body (for example
+   * `DELETE /documents/:id/relationships/sections/:id`). Documents themselves
+   * are the exception: there is no `DELETE /documents/:id`. Permanent
+   * deletion is bulk destroy (`DELETE /documents`), and the caller must pass
+   * the JSON:API body that identifies the records. Omit `body` for
+   * path-addressed deletes.
+   */
+  async delete(path: string, body?: Record<string, unknown>): Promise<void> {
     const url = `${this.baseUrl}${path}`;
 
     const response = await fetch(url, {
       method: "DELETE",
       headers: {
         ...this.authHeaders(),
+        ...(body ? { "Content-Type": "application/vnd.api+json" } : {}),
         Accept: "application/vnd.api+json",
       },
+      body: body ? JSON.stringify(body) : undefined,
     });
 
     if (!response.ok) {
@@ -1577,6 +1606,59 @@ export function createMcpServer(credentialOverrides?: GatewayCredentials): Serve
             },
           },
           required: ["organization_id", "name"],
+        },
+      },
+      {
+        name: "update_document",
+        description:
+          "Rename an IT Glue document. Only the name you supply is changed. This does not move the " +
+          "document between folders — IT Glue's Documents API marks document_folder_id as not permitted " +
+          "on PUT/PATCH — and it does not change the document body. Use update_document_section / " +
+          "create_document_section for content, then publish_document.",
+        annotations: {
+          title: "Update document",
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: true,
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            document_id: {
+              type: "number",
+              description: "The document ID to rename. A numeric string is accepted.",
+            },
+            name: {
+              type: "string",
+              description: "New document name/title",
+            },
+          },
+          required: ["document_id", "name"],
+        },
+      },
+      {
+        name: "delete_document",
+        description:
+          "⚠ DESTRUCTIVE — IRREVERSIBLE. Permanently deletes an IT Glue document, including all of " +
+          "its sections. This action cannot be undone — prefer archive_document if the document " +
+          "may be needed again. Confirm with the user before invoking.",
+        annotations: {
+          title: "Delete document (irreversible)",
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: false,
+          openWorldHint: true,
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            document_id: {
+              type: "number",
+              description: "The document ID to delete. A numeric string is accepted.",
+            },
+          },
+          required: ["document_id"],
         },
       },
       // Document Sections
@@ -2773,6 +2855,55 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         });
         return {
           content: [{ type: "text", text: JSON.stringify(newDoc, null, 2) }],
+        };
+      }
+
+      case "update_document": {
+        const documentId = positiveInteger(args?.document_id);
+        if (documentId === undefined) {
+          return {
+            content: [{ type: "text", text: "Error: document_id is required and must be a positive integer" }],
+            isError: true,
+          };
+        }
+        const name = args?.name;
+        if (typeof name !== "string" || name.trim() === "") {
+          return {
+            content: [{ type: "text", text: "Error: name must be a non-empty string" }],
+            isError: true,
+          };
+        }
+        // Name only. IT Glue's developer docs (api.itglue.com/developer, checked
+        // 2026-10-07) list attributes[document_folder_id] as "Not permitted in
+        // PUT/PATCH, optional in POST" on the document update params, including
+        // the bulk PATCH /documents form. A folder id supplied by the caller is
+        // ignored so a combined rename-and-move cannot fail the whole request.
+        const updatedDoc = await client.patch(`/documents/${documentId}`, {
+          data: {
+            type: "documents",
+            attributes: { name },
+          },
+        });
+        return {
+          content: [{ type: "text", text: JSON.stringify(updatedDoc, null, 2) }],
+        };
+      }
+
+      case "delete_document": {
+        const documentId = positiveInteger(args?.document_id);
+        if (documentId === undefined) {
+          return {
+            content: [{ type: "text", text: "Error: document_id is required and must be a positive integer" }],
+            isError: true,
+          };
+        }
+        // IT Glue only exposes bulk destroy for documents: DELETE /documents
+        // with the ids in a JSON:API body. There is no DELETE /documents/:id.
+        await client.delete("/documents", {
+          data: [{ type: "documents", attributes: { id: documentId } }],
+        });
+        return {
+          content: [{ type: "text", text: `Document ${documentId} deleted successfully` }],
         };
       }
 
