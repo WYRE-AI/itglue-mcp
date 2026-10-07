@@ -3177,6 +3177,24 @@ describe("Document section tools (round-trip)", () => {
       };
       expect(schema.properties).not.toHaveProperty("document_folder_id");
       expect(schema.required).toEqual(["document_id", "name"]);
+      const decimalId = {
+        anyOf: [
+          { type: "integer", minimum: 1 },
+          { type: "string", pattern: "^[1-9][0-9]*$" },
+        ],
+      };
+      expect(schema.properties?.document_id).toEqual({
+        description: "The document ID to rename. A numeric string is accepted.",
+        ...decimalId,
+      });
+      const deleteTool = tools.find((t) => t.name === "delete_document");
+      const deleteSchema = deleteTool?.inputSchema as {
+        properties?: Record<string, unknown>;
+      };
+      expect(deleteSchema.properties?.document_id).toEqual({
+        description: "The document ID to delete. A numeric string is accepted.",
+        ...decimalId,
+      });
     });
 
     it("rejects an empty name without calling the API", async () => {

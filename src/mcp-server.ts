@@ -1626,8 +1626,11 @@ export function createMcpServer(credentialOverrides?: GatewayCredentials): Serve
           type: "object",
           properties: {
             document_id: {
-              type: "number",
               description: "The document ID to rename. A numeric string is accepted.",
+              anyOf: [
+                { type: "integer", minimum: 1 },
+                { type: "string", pattern: "^[1-9][0-9]*$" },
+              ],
             },
             name: {
               type: "string",
@@ -1654,8 +1657,11 @@ export function createMcpServer(credentialOverrides?: GatewayCredentials): Serve
           type: "object",
           properties: {
             document_id: {
-              type: "number",
               description: "The document ID to delete. A numeric string is accepted.",
+              anyOf: [
+                { type: "integer", minimum: 1 },
+                { type: "string", pattern: "^[1-9][0-9]*$" },
+              ],
             },
           },
           required: ["document_id"],
