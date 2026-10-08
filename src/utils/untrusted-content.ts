@@ -75,15 +75,18 @@ const ENV_VAR = "ITGLUE_UNTRUSTED_MARKERS";
  *   (region, a totalCount) from a probe request; nothing from IT Glue's
  *   content flows into it.
  * - Every write/mutation tool (`create_location`, `update_location`,
- *   `create_document`, `create_document_section`, `update_document_section`,
+ *   `create_document`, `update_document`, `delete_document`,
+ *   `create_document_section`, `update_document_section`,
  *   `delete_document_section`, `create_attachment`, `publish_document`,
  *   `archive_document`, `unarchive_document`) — these echo back what the
  *   CURRENT call just supplied (an id, a confirmation, or the attributes the
- *   caller itself passed in). They don't introduce content the calling agent
- *   didn't already have in this same turn, so marking them adds noise
- *   without adding information. The risk they pose is what they let a
- *   compromised agent DO (persist a payload), not what they report back —
- *   and that risk is bounded by tool authorization, not by a text label.
+ *   caller itself passed in). `update_document` is rename-only, so the name
+ *   in its PATCH result is the name this call just wrote. They don't
+ *   introduce content the calling agent didn't already have in this same
+ *   turn, so marking them adds noise without adding information. The risk
+ *   they pose is what they let a compromised agent DO (persist a payload),
+ *   not what they report back — and that risk is bounded by tool
+ *   authorization, not by a text label.
  */
 export const UNTRUSTED_CONTENT_TOOLS: ReadonlySet<string> = new Set([
   // Document body and structure — the core of the stored-injection risk.

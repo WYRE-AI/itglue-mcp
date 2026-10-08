@@ -85,6 +85,15 @@
 
 ### Added
 
+- **`update_document` and `delete_document`.** `update_document` renames a
+  document with `PATCH /documents/:id` (name only). IT Glue's developer docs
+  mark `document_folder_id` as not permitted on PUT/PATCH, so this tool does
+  not move documents between folders or to the organization root.
+  `delete_document` permanently deletes a document and its sections through
+  the bulk-destroy endpoint `DELETE /documents` (JSON:API body; there is no
+  `DELETE /documents/:id`). `ITGlueClient.delete` accepts an optional JSON:API
+  body for that bulk-destroy shape. Prefer `archive_document` when the
+  document may be needed again.
 - **Interactive document card via MCP Apps (SEP-1865).** `get_document` results now
   render as an interactive card in MCP Apps hosts (Claude Desktop/web, and other
   hosts advertising the `io.modelcontextprotocol/ui` extension), instead of a wall
