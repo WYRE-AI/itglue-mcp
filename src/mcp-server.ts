@@ -14,11 +14,13 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
+  type CallToolResult,
 } from "@modelcontextprotocol/sdk/types.js";
 import { elicitSelection, elicitText } from "./utils/elicitation.js";
 import { registerPromptHandlers } from "./prompts.js";
 import { registerResourceHandlers } from "./resources.js";
 import { buildDocumentCard, DOCUMENT_CARD_META } from "./card.builder.js";
+import { applyUntrustedContentMarkers } from "./utils/untrusted-content.js";
 
 
 // IT Glue region configuration
@@ -241,6 +243,23 @@ function apiErrorStatus(err: unknown): number | null {
 }
 
 /**
+ * Coerce a tool argument to a positive integer.
+ *
+ * MCP hosts sometimes send numeric IDs as strings. Missing, blank, NaN,
+ * non-integer, zero, and negative values are rejected.
+ */
+function positiveInteger(value: unknown): number | undefined {
+  const numeric =
+    typeof value === "number"
+      ? value
+      : typeof value === "string" && value.trim() !== ""
+        ? Number(value)
+        : Number.NaN;
+  if (!Number.isInteger(numeric) || numeric <= 0) return undefined;
+  return numeric;
+}
+
+/**
  * Record types that IT Glue accepts attachments on, as the plural path segment
  * used by `/:resource_type/:resource_id/relationships/attachments`.
  *
@@ -451,15 +470,27 @@ export class ITGlueClient {
     return deserializeResource(resource) as T;
   }
 
-  async delete(path: string): Promise<void> {
+  /**
+   * Delete a resource. Resolves with no value.
+   *
+   * Most IT Glue deletes are path-addressed and take no body (for example
+   * `DELETE /documents/:id/relationships/sections/:id`). Documents themselves
+   * are the exception: there is no `DELETE /documents/:id`. Permanent
+   * deletion is bulk destroy (`DELETE /documents`), and the caller must pass
+   * the JSON:API body that identifies the records. Omit `body` for
+   * path-addressed deletes.
+   */
+  async delete(path: string, body?: Record<string, unknown>): Promise<void> {
     const url = `${this.baseUrl}${path}`;
 
     const response = await fetch(url, {
       method: "DELETE",
       headers: {
         ...this.authHeaders(),
+        ...(body ? { "Content-Type": "application/vnd.api+json" } : {}),
         Accept: "application/vnd.api+json",
       },
+      body: body ? JSON.stringify(body) : undefined,
     });
 
     if (!response.ok) {
@@ -841,6 +872,120 @@ export async function requestDocumentsWithFolderDefault(
 }
 
 /**
+ * IT Glue page size cap, used as the fetch size for
+ * {@link searchByNameWithFallback}'s broad listing.
+ */
+const NAME_FALLBACK_PAGE_SIZE = 1000;
+
+/**
+ * Max IT Glue pages {@link searchByNameWithFallback} will walk before giving
+ * up, so a name that matches nothing doesn't walk an entire multi-thousand
+ * -record account one page at a time.
+ */
+const NAME_FALLBACK_MAX_PAGES = 5;
+
+/**
+ * Result of a {@link searchByNameWithFallback} client-side substring search.
+ *
+ * `data` and `meta` describe the CALLER's requested page — not the
+ * underlying IT Glue fetch. Matches are accumulated across the fallback's own
+ * (up to NAME_FALLBACK_MAX_PAGES) requests, at NAME_FALLBACK_PAGE_SIZE each,
+ * before `data` is sliced down to the caller's `page.size`/`page.number` and
+ * `meta` (currentPage/nextPage/prevPage/totalPages/totalCount) is computed
+ * over that accumulated match set, exactly as if it had come back from IT
+ * Glue directly.
+ */
+export interface NameFallbackResult {
+  /** The caller's requested page of matches — already sliced, ready to return as-is. */
+  data: unknown[];
+  /** Pagination over the accumulated matches (not over the underlying IT Glue pages fetched to find them). */
+  meta: PaginationMeta;
+  /**
+   * True when the underlying listing hit NAME_FALLBACK_MAX_PAGES while a
+   * page still reported a `nextPage` — i.e. the search gave up before
+   * exhausting the resource, so `meta.totalCount` (and therefore `data`) may
+   * be missing matches that exist beyond the pages actually walked.
+   */
+  capped: boolean;
+}
+
+/**
+ * Client-side "contains" search for a resource whose IT Glue `filter[name]`
+ * is exact-match only.
+ *
+ * Organizations and Documents match `filter[name]` exactly rather than
+ * partially, unlike most other IT Glue resources (Configurations, Locations,
+ * Passwords) whose `filter[name]` genuinely does a case-insensitive contains
+ * match. Callers should therefore try the cheap, correct path first — send
+ * `filter[name]` as-is, which is fast and right whenever the caller already
+ * has the exact name — and only reach for this when that comes back empty.
+ *
+ * This walks `fetchPage` at the maximum IT Glue page size, matching `name`
+ * case-insensitively as a substring, until a page reports no `nextPage` or
+ * NAME_FALLBACK_MAX_PAGES is reached (`capped: true` in the latter case — the
+ * result may be incomplete). The caller's requested page is then sliced out
+ * of the accumulated matches, so pagination behaves the same as any other
+ * search result from the tool's perspective.
+ */
+export async function searchByNameWithFallback(
+  fetchPage: (page: {
+    size: number;
+    number: number;
+  }) => Promise<{ data: unknown[]; meta: PaginationMeta }>,
+  name: string,
+  page: { size: number; number: number }
+): Promise<NameFallbackResult> {
+  const needle = name.toLowerCase();
+  const matches: unknown[] = [];
+  let capped = false;
+
+  for (let pageNumber = 1; pageNumber <= NAME_FALLBACK_MAX_PAGES; pageNumber++) {
+    const result = await fetchPage({ size: NAME_FALLBACK_PAGE_SIZE, number: pageNumber });
+    for (const item of result.data) {
+      const itemName = (item as { name?: unknown } | null)?.name;
+      if (typeof itemName === "string" && itemName.toLowerCase().includes(needle)) {
+        matches.push(item);
+      }
+    }
+    if (!result.meta.nextPage) break;
+    if (pageNumber === NAME_FALLBACK_MAX_PAGES) capped = true;
+  }
+
+  const totalCount = matches.length;
+  const totalPages = Math.max(1, Math.ceil(totalCount / page.size));
+  const start = (page.number - 1) * page.size;
+
+  return {
+    data: matches.slice(start, start + page.size),
+    meta: {
+      currentPage: page.number,
+      nextPage: page.number < totalPages ? page.number + 1 : null,
+      prevPage: page.number > 1 ? page.number - 1 : null,
+      totalPages,
+      totalCount,
+    },
+    capped,
+  };
+}
+
+/**
+ * Advisory note attached when {@link searchByNameWithFallback} produced the
+ * result, so the model doesn't mistake a client-side substring match (and a
+ * possibly-capped one) for IT Glue's own search.
+ */
+export function nameFallbackNote(resource: string, name: string, capped: boolean): string {
+  return (
+    `NOTE: IT Glue's filter[name] matches ${resource} EXACTLY, not partially, so the exact-match ` +
+    `query for "${name}" returned nothing and this result comes from a client-side, case-insensitive ` +
+    `substring match instead.` +
+    (capped
+      ? ` The underlying listing was capped at ${NAME_FALLBACK_MAX_PAGES * NAME_FALLBACK_PAGE_SIZE} ` +
+        `records before matching, so there may be further matches beyond that not reflected here.`
+      : "")
+  );
+}
+
+/**
  * Enumerate an organization's document folders using API-key auth.
  *
  * IT Glue's public API now documents a Document Folders resource, but the
@@ -1000,6 +1145,12 @@ export function createMcpServer(credentialOverrides?: GatewayCredentials): Serve
         tools: {},
         prompts: {},
         resources: {},
+        // MCP Apps (SEP-1865): explicitly declare the extension capability so
+        // clients can negotiate UI support without inferring it from the
+        // presence of ui:// resources (SEP-1724 extensions mechanism).
+        extensions: {
+          "io.modelcontextprotocol/ui": {},
+        },
       },
     }
   );
@@ -1489,6 +1640,65 @@ export function createMcpServer(credentialOverrides?: GatewayCredentials): Serve
           required: ["organization_id", "name"],
         },
       },
+      {
+        name: "update_document",
+        description:
+          "Rename an IT Glue document. Only the name you supply is changed. This does not move the " +
+          "document between folders — IT Glue's Documents API marks document_folder_id as not permitted " +
+          "on PUT/PATCH — and it does not change the document body. Use update_document_section / " +
+          "create_document_section for content, then publish_document.",
+        annotations: {
+          title: "Update document",
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: true,
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            document_id: {
+              description: "The document ID to rename. A numeric string is accepted.",
+              anyOf: [
+                { type: "integer", minimum: 1 },
+                { type: "string", pattern: "^[1-9][0-9]*$" },
+              ],
+            },
+            name: {
+              type: "string",
+              description: "New document name/title",
+            },
+          },
+          required: ["document_id", "name"],
+        },
+      },
+      {
+        name: "delete_document",
+        description:
+          "⚠ DESTRUCTIVE — IRREVERSIBLE. Permanently deletes an IT Glue document, including all of " +
+          "its sections. This action cannot be undone — prefer archive_document if the document " +
+          "may be needed again. Confirm with the user before invoking.",
+        annotations: {
+          title: "Delete document (irreversible)",
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: false,
+          openWorldHint: true,
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            document_id: {
+              description: "The document ID to delete. A numeric string is accepted.",
+              anyOf: [
+                { type: "integer", minimum: 1 },
+                { type: "string", pattern: "^[1-9][0-9]*$" },
+              ],
+            },
+          },
+          required: ["document_id"],
+        },
+      },
       // Document Sections
       {
         name: "list_document_sections",
@@ -1696,6 +1906,58 @@ export function createMcpServer(credentialOverrides?: GatewayCredentials): Serve
           required: ["document_id"],
         },
       },
+      {
+        name: "archive_configuration",
+        description:
+          "⚠ HIGH-IMPACT. Archives an IT Glue configuration (soft delete — hides it from normal " +
+          "views but keeps it recoverable). Use unarchive_configuration to restore. " +
+          "Configurations synced from a PSA or RMM integration (psaIntegration: enabled / " +
+          "syncActive: true on the record) may be restored or updated by the next sync, so tidy " +
+          "up the source system (Autotask / Datto RMM) first. Confirm with the user before invoking.",
+        annotations: {
+          title: "Archive configuration (reversible)",
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: true,
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            configuration_id: {
+              type: "number",
+              description: "The configuration ID to archive",
+            },
+          },
+          required: ["configuration_id"],
+        },
+      },
+      {
+        name: "unarchive_configuration",
+        description:
+          "⚠ HIGH-IMPACT. Restores a previously archived IT Glue configuration so it appears in " +
+          "normal views again. This makes the configuration visible to all users. " +
+          "Configurations synced from a PSA or RMM integration (psaIntegration: enabled / " +
+          "syncActive: true on the record) may be restored or updated by the next sync, so tidy " +
+          "up the source system (Autotask / Datto RMM) first. Confirm with the user before invoking.",
+        annotations: {
+          title: "Unarchive configuration (reversible)",
+          readOnlyHint: false,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: true,
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            configuration_id: {
+              type: "number",
+              description: "The configuration ID to unarchive",
+            },
+          },
+          required: ["configuration_id"],
+        },
+      },
       // Flexible Assets
       {
         name: "list_flexible_asset_types",
@@ -1817,6 +2079,14 @@ let sessionJwt: string | undefined;
 
 // Handle tool calls
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  // Every case below returns from deep inside a switch, at very different
+  // points in the credential/elicitation setup — there is no single `return`
+  // at the end of this function to hook into. Running the whole handler as
+  // an IIFE and post-processing its settled result here instead gives
+  // untrusted-content marking one seam to wire into (see
+  // applyUntrustedContentMarkers / utils/untrusted-content.ts) without
+  // touching any individual case.
+  const result = await (async (): Promise<CallToolResult> => {
   const { name, arguments: args } = request.params;
   const credentials = credentialOverrides
     ? sanitizeCredentials(credentialOverrides)
@@ -1904,19 +2174,39 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         if (Object.keys(filter).length > 0) params.filter = filter;
         if (args?.sort) params.sort = args.sort;
-        params.page = {
+        const page = {
           size: (args?.page_size as number) || 50,
           number: (args?.page_number as number) || 1,
         };
+        params.page = page;
 
-        const result = await client.request("/organizations", params);
+        let result = await client.request("/organizations", params);
+        let note: string | null = null;
+
+        // IT Glue's filter[name] matches organizations exactly, not
+        // partially. The query above is the cheap, correct path whenever the
+        // caller already has the exact name; only when it comes back empty
+        // do we fall back to a broader, unfiltered listing matched
+        // client-side as a substring (see searchByNameWithFallback).
+        if (orgName && result.data.length === 0) {
+          const { name: _droppedNameFilter, ...otherFilters } = filter;
+          const fallback = await searchByNameWithFallback(
+            (fallbackPage) =>
+              client.request<unknown>("/organizations", {
+                ...(Object.keys(otherFilters).length > 0 ? { filter: otherFilters } : {}),
+                ...(args?.sort ? { sort: args.sort } : {}),
+                page: fallbackPage,
+              }),
+            orgName,
+            page
+          );
+          result = { data: fallback.data, meta: fallback.meta };
+          note = nameFallbackNote("organizations", orgName, fallback.capped);
+        }
+
+        const text = [note, JSON.stringify(result, null, 2)].filter(Boolean).join("\n\n");
         return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(result, null, 2),
-            },
-          ],
+          content: [{ type: "text", text }],
         };
       }
 
@@ -2259,18 +2549,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         }
 
+        const docName = args?.name as string | undefined;
         const params: Record<string, unknown> = {};
         const filter: Record<string, unknown> = {};
 
-        if (args?.name) filter.name = args.name;
+        if (docName) filter.name = docName;
         if (args?.document_folder_id) filter.documentFolderId = args.document_folder_id;
 
         if (Object.keys(filter).length > 0) params.filter = filter;
         if (args?.sort) params.sort = args.sort;
-        params.page = {
+        const page = {
           size: (args?.page_size as number) || 50,
           number: (args?.page_number as number) || 1,
         };
+        params.page = page;
 
         try {
           let result: { data: unknown[]; meta: PaginationMeta };
@@ -2302,12 +2594,59 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 : folderedDocumentsIncludedNote();
           }
 
+          // IT Glue's filter[name] matches documents exactly, not partially.
+          // The query above is the cheap, correct path whenever the caller
+          // already has the exact name; only when it comes back empty do we
+          // fall back to a broader listing matched client-side as a
+          // substring (see searchByNameWithFallback).
+          let nameNote: string | null = null;
+          if (docName && result.data.length === 0) {
+            // Each fallback page re-negotiates the folder filter independently
+            // (see requestDocumentsWithFolderDefault) — capture every page's
+            // attempt so the scope note below describes what actually
+            // produced `result`, not the (now-discarded) primary attempt.
+            const fallbackAttempts: DocumentSearchAttempt[] = [];
+            const fallback = await searchByNameWithFallback(
+              (fallbackPage) =>
+                args?.document_folder_id
+                  ? client.request<unknown>(
+                      `/organizations/${args.organization_id}/relationships/documents`,
+                      {
+                        filter: { documentFolderId: args.document_folder_id },
+                        ...(args?.sort ? { sort: args.sort } : {}),
+                        page: fallbackPage,
+                      }
+                    )
+                  : requestDocumentsWithFolderDefault(
+                      client,
+                      args.organization_id as number | string,
+                      { ...(args?.sort ? { sort: args.sort } : {}), page: fallbackPage }
+                    ).then((attempted) => {
+                      fallbackAttempts.push(attempted.attempt);
+                      return attempted.result;
+                    }),
+              docName,
+              page
+            );
+            result = { data: fallback.data, meta: fallback.meta };
+            nameNote = nameFallbackNote("documents", docName, fallback.capped);
+
+            if (!args?.document_folder_id) {
+              note = fallbackAttempts.includes("unfiltered")
+                ? rootLevelDocumentsNote({
+                    folderFiltered: false,
+                    haveJwt: Boolean(sessionJwt ?? credentials.jwt),
+                  })
+                : folderedDocumentsIncludedNote();
+            }
+          }
+
           // Drop each document's full body — search_documents is a list tool,
           // and IT Glue's list endpoint inlines the entire sectioned body per
           // document, which can balloon the response past the client's limit
           // (issue #55). Bodies stay available via get_document.
           const trimmed = { ...result, data: stripDocumentBodies(result.data) };
-          const text = [documentBodyOmittedNote(), note, JSON.stringify(trimmed, null, 2)]
+          const text = [documentBodyOmittedNote(), nameNote, note, JSON.stringify(trimmed, null, 2)]
             .filter(Boolean)
             .join("\n\n");
           return {
@@ -2346,8 +2685,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const card = await buildDocumentCard(payload, client);
         if (card) payload._card = card;
 
+        // MCP Apps (SEP-1865): the model-facing content is a short text
+        // summary; the full JSON payload (including _card) lives in
+        // structuredContent so it isn't duplicated into the LLM context.
+        const docName =
+          typeof payload.name === "string" ? payload.name : `document ${args.id}`;
         return {
-          content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
+          content: [{ type: "text", text: `Retrieved document "${docName}".` }],
+          structuredContent: payload,
         };
       }
 
@@ -2551,6 +2896,55 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
+      case "update_document": {
+        const documentId = positiveInteger(args?.document_id);
+        if (documentId === undefined) {
+          return {
+            content: [{ type: "text", text: "Error: document_id is required and must be a positive integer" }],
+            isError: true,
+          };
+        }
+        const name = args?.name;
+        if (typeof name !== "string" || name.trim() === "") {
+          return {
+            content: [{ type: "text", text: "Error: name must be a non-empty string" }],
+            isError: true,
+          };
+        }
+        // Name only. IT Glue's developer docs (api.itglue.com/developer, checked
+        // 2026-10-07) list attributes[document_folder_id] as "Not permitted in
+        // PUT/PATCH, optional in POST" on the document update params, including
+        // the bulk PATCH /documents form. A folder id supplied by the caller is
+        // ignored so a combined rename-and-move cannot fail the whole request.
+        const updatedDoc = await client.patch(`/documents/${documentId}`, {
+          data: {
+            type: "documents",
+            attributes: { name },
+          },
+        });
+        return {
+          content: [{ type: "text", text: JSON.stringify(updatedDoc, null, 2) }],
+        };
+      }
+
+      case "delete_document": {
+        const documentId = positiveInteger(args?.document_id);
+        if (documentId === undefined) {
+          return {
+            content: [{ type: "text", text: "Error: document_id is required and must be a positive integer" }],
+            isError: true,
+          };
+        }
+        // IT Glue only exposes bulk destroy for documents: DELETE /documents
+        // with the ids in a JSON:API body. There is no DELETE /documents/:id.
+        await client.delete("/documents", {
+          data: [{ type: "documents", attributes: { id: documentId } }],
+        });
+        return {
+          content: [{ type: "text", text: `Document ${documentId} deleted successfully` }],
+        };
+      }
+
       // Document Sections
       case "list_document_sections": {
         if (!args?.document_id) {
@@ -2751,6 +3145,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
+      case "archive_configuration":
+      case "unarchive_configuration": {
+        if (!args?.configuration_id) {
+          return {
+            content: [{ type: "text", text: "Error: configuration_id is required" }],
+            isError: true,
+          };
+        }
+        // IT Glue toggles archive state via PATCH /configurations/:id with the
+        // standard JSON:API document resource shape. There is no dedicated
+        // /archive sub-endpoint — only the `archived` boolean attribute.
+        const archived = name === "archive_configuration";
+        const result = await client.patch(`/configurations/${args.configuration_id}`, {
+          data: {
+            type: "configurations",
+            attributes: { archived },
+          },
+        });
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        };
+      }
+
       // Flexible Assets
       case "list_flexible_asset_types": {
         const params: Record<string, unknown> = {};
@@ -2904,6 +3321,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       isError: true,
     };
   }
+  })();
+
+  return applyUntrustedContentMarkers(request.params.name, result);
 });
 
   return server;

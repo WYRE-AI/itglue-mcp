@@ -134,6 +134,15 @@
 
 ### Added
 
+- **`update_document` and `delete_document`.** `update_document` renames a
+  document with `PATCH /documents/:id` (name only). IT Glue's developer docs
+  mark `document_folder_id` as not permitted on PUT/PATCH, so this tool does
+  not move documents between folders or to the organization root.
+  `delete_document` permanently deletes a document and its sections through
+  the bulk-destroy endpoint `DELETE /documents` (JSON:API body; there is no
+  `DELETE /documents/:id`). `ITGlueClient.delete` accepts an optional JSON:API
+  body for that bulk-destroy shape. Prefer `archive_document` when the
+  document may be needed again.
 - **Interactive document card via MCP Apps (SEP-1865).** `get_document` results now
   render as an interactive card in MCP Apps hosts (Claude Desktop/web, and other
   hosts advertising the `io.modelcontextprotocol/ui` extension), instead of a wall
@@ -191,6 +200,26 @@
   images by absolute URL in document section HTML.
 
 ### Fixed
+
+- **`search_organizations` and `search_documents` silently required an exact
+  organization/document name.** IT Glue's `filter[name]` matches these two
+  resources EXACTLY, not partially — unlike `search_configurations`,
+  `search_locations` and `search_passwords`, whose `filter[name]` genuinely
+  does a case-insensitive contains match. A caller searching for "Acme" got
+  nothing back unless it supplied the organization's or document's full
+  stored name, even though both tools' own descriptions promised a "partial
+  match". Both handlers still send the cheap exact-match query first — the
+  fast, correct answer whenever the caller already has the exact name — and
+  only fall back when that comes back empty, walking a broader listing without
+  the exact-name filter and matching `name` client-side as a case-insensitive
+  substring (`searchByNameWithFallback()`), capped at 5 pages of 1,000 records
+  so a name that matches nothing doesn't walk an entire multi-thousand-record
+  account. The result carries a note whenever this fallback path was used
+  (and whether it was capped). For `search_documents`, the existing
+  folder-scope note (root-level vs folder-inclusive) is now derived from
+  whichever attempt actually produced the fallback's data rather than the
+  primary (empty) request's attempt, so it can no longer describe a folder
+  scope the returned documents don't actually have.
 
 - **`search_passwords` could hand back plaintext secrets.** The handler asks IT
   Glue not to send them (`show_password=false`), but that is a request, not a

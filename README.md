@@ -96,6 +96,8 @@ If you do need the JWT fallback, provide it in whichever way matches your deploy
 
 - **search_configurations** - Search for configurations with filtering by organization, name, type, status, serial number, RMM ID, or PSA ID
 - **get_configuration** - Get a specific configuration by ID
+- **archive_configuration** - Archive a configuration (soft delete — hides it from normal views but keeps it recoverable). Reversible with `unarchive_configuration`. Configurations synced from a PSA/RMM integration (`psaIntegration: enabled` / `syncActive: true`) may be restored or updated by the next sync, so tidy up the source system (Autotask / Datto RMM) first
+- **unarchive_configuration** - Restore a previously archived configuration so it appears in normal views again
 
 ### Locations (Addresses/Sites)
 
@@ -114,6 +116,16 @@ If you do need the JWT fallback, provide it in whichever way matches your deploy
 - **search_documents** - Search for documents with filtering by organization, name, or folder. Defaults to a folder-inclusive listing (each result carries its `documentFolderId`), degrading gracefully to a root-only listing on tenants whose API rejects the folder filter
 - **get_document** - Get a specific document by ID, including its sectioned body. Renders as an interactive card in MCP Apps hosts — see [Interactive Document Card](#interactive-document-card-mcp-apps)
 - **list_document_folders** - List an organization's document folders (names and IDs). Works with an API key on tenants where IT Glue exposes the Document Folders resource; falls back to a JWT otherwise — see [JWT fallback for document-folder operations](#jwt-fallback-for-document-folder-operations)
+- **create_document** - Create a document in an organization, optionally with body content. Prompts for a folder if none is given; pass `skip_folder_prompt=true` to create at the organization root
+- **update_document** - Rename a document. Only the name you supply is changed. Folder moves are not supported: IT Glue's Documents API marks `document_folder_id` as not permitted on PUT/PATCH
+- **list_document_sections** - List a document's sections in order, before editing
+- **create_document_section** - Add a heading or text section. Call `publish_document` after editing
+- **update_document_section** - Replace a section's content. Call `publish_document` after editing
+- **delete_document_section** - ⚠ Permanently delete one section (irreversible). Call `publish_document` after editing
+- **publish_document** - Publish section changes so they become visible
+- **archive_document** - Soft-delete a document (hidden from normal views, recoverable with `unarchive_document`)
+- **unarchive_document** - Restore a previously archived document
+- **delete_document** - ⚠ Permanently delete a document and all its sections (irreversible — prefer `archive_document` if it may be needed again)
 
 ### Attachments
 

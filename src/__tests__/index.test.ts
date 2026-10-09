@@ -352,6 +352,8 @@ describe("Tool Definitions", () => {
     { name: "get_document", requiredFields: ["organization_id", "id"], properties: ["organization_id", "id"] },
     { name: "list_document_folders", requiredFields: ["organization_id"], properties: ["organization_id", "name", "page_size", "page_number"] },
     { name: "create_document", requiredFields: ["organization_id", "name"], properties: ["organization_id", "name", "content"] },
+    { name: "update_document", requiredFields: ["document_id", "name"], properties: ["document_id", "name"] },
+    { name: "delete_document", requiredFields: ["document_id"], properties: ["document_id"] },
     { name: "list_document_sections", requiredFields: ["document_id"], properties: ["document_id"] },
     { name: "create_document_section", requiredFields: ["document_id", "section_type", "content"], properties: ["document_id", "section_type", "content"] },
     { name: "update_document_section", requiredFields: ["document_id", "section_id", "content"], properties: ["document_id", "section_id", "content"] },
@@ -361,6 +363,8 @@ describe("Tool Definitions", () => {
     { name: "publish_document", requiredFields: ["document_id"], properties: ["document_id"] },
     { name: "archive_document", requiredFields: ["document_id"], properties: ["document_id"] },
     { name: "unarchive_document", requiredFields: ["document_id"], properties: ["document_id"] },
+    { name: "archive_configuration", requiredFields: ["configuration_id"], properties: ["configuration_id"] },
+    { name: "unarchive_configuration", requiredFields: ["configuration_id"], properties: ["configuration_id"] },
     { name: "search_flexible_assets", requiredFields: ["flexible_asset_type_id"], properties: ["flexible_asset_type_id", "organization_id", "name", "page_size", "page_number", "sort"] },
     { name: "list_flexible_asset_types", requiredFields: [], properties: ["organization_id"] },
     { name: "search_user_metrics", requiredFields: [] as string[], properties: ["user_id", "organization_id", "resource_type", "start_date", "end_date", "sort", "page_size", "page_number"] },
@@ -378,8 +382,8 @@ describe("Tool Definitions", () => {
     });
   });
 
-  it("should have 25 tools total", () => {
-    expect(tools.length).toBe(27);
+  it("should have 31 tools total", () => {
+    expect(tools.length).toBe(31);
   });
 });
 
@@ -1114,7 +1118,7 @@ describe("Unknown Tool Handling", () => {
     const client = await connectClient();
     const { tools } = await client.listTools();
 
-    expect(tools.length).toBe(27);
+    expect(tools.length).toBe(31);
     // Every advertised tool must reach a real branch — not the Unknown-tool
     // default — so a rename in the ListTools block can't drift from the switch.
     for (const tool of tools) {
@@ -1672,10 +1676,10 @@ describe("Locations tools (round-trip)", () => {
     );
   });
 
-  it("exposes 25 tools total", async () => {
+  it("exposes 31 tools total", async () => {
     const client = await connectLocationsClient();
     const { tools } = await client.listTools();
-    expect(tools.length).toBe(27);
+    expect(tools.length).toBe(31);
   });
 
   it("search_locations queries /locations filtered by organization and city", async () => {
@@ -2216,9 +2220,13 @@ describe("Core tools (round-trip)", () => {
 
     it("passes the name filter through as filter[name]", async () => {
       const client = await connectCoreClient();
-      mockFetch.mockResolvedValueOnce(
-        createMockResponse(createJsonApiResponse([]))
-      );
+      // The exact-match query comes back empty here, which triggers the
+      // name-fallback search (see the "name fallback" tests below) — queue a
+      // second empty page for it so that fallback doesn't hit an unconfigured
+      // mock.
+      mockFetch
+        .mockResolvedValueOnce(createMockResponse(createJsonApiResponse([])))
+        .mockResolvedValueOnce(createMockResponse(createJsonApiResponse([])));
 
       await client.callTool({
         name: "search_organizations",
@@ -2274,9 +2282,9 @@ describe("Core tools (round-trip)", () => {
 
     it("sends the API key and JSON:API headers on the handler's own request", async () => {
       const client = await connectCoreClient();
-      mockFetch.mockResolvedValueOnce(
-        createMockResponse(createJsonApiResponse([]))
-      );
+      mockFetch
+        .mockResolvedValueOnce(createMockResponse(createJsonApiResponse([])))
+        .mockResolvedValueOnce(createMockResponse(createJsonApiResponse([])));
 
       await client.callTool({
         name: "search_organizations",
@@ -2288,6 +2296,137 @@ describe("Core tools (round-trip)", () => {
       expect(headers["x-api-key"]).toBe("test-api-key");
       expect(headers["Content-Type"]).toBe("application/vnd.api+json");
       expect(headers["Accept"]).toBe("application/vnd.api+json");
+    });
+
+    describe("name fallback (IT Glue's filter[name] is exact-match only)", () => {
+      it("falls back to a client-side substring match when the exact-match query is empty", async () => {
+        const client = await connectCoreClient();
+        mockFetch
+          // Primary exact-match query: no hit.
+          .mockResolvedValueOnce(createMockResponse(createJsonApiResponse([])))
+          // Fallback broad listing: matched client-side.
+          .mockResolvedValueOnce(
+            createMockResponse(
+              createJsonApiResponse([
+                { id: "1", type: "organizations", attributes: { name: "Acme Corp Pty Ltd" } },
+                { id: "2", type: "organizations", attributes: { name: "Beta Inc" } },
+              ])
+            )
+          );
+
+        const result = await client.callTool({
+          name: "search_organizations",
+          arguments: { name: "acme" },
+        });
+
+        expect(mockFetch).toHaveBeenCalledTimes(2);
+        // Fallback request drops the (broken) exact-match name filter.
+        expect(decodedUrl(1)).not.toContain("filter[name]");
+        expect(decodedUrl(1)).toContain("page[size]=1000");
+
+        const text = firstText(result);
+        expect(text).toContain("client-side, case-insensitive");
+        expect(text).toContain("Acme Corp Pty Ltd");
+        expect(text).not.toContain("Beta Inc");
+      });
+
+      it("does not fall back when the exact-match query already found something", async () => {
+        const client = await connectCoreClient();
+        mockFetch.mockResolvedValueOnce(
+          createMockResponse(
+            createJsonApiResponse([
+              { id: "1", type: "organizations", attributes: { name: "Acme Corp" } },
+            ])
+          )
+        );
+
+        const result = await client.callTool({
+          name: "search_organizations",
+          arguments: { name: "Acme Corp" },
+        });
+
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+        expect(firstText(result)).not.toContain("client-side");
+      });
+
+      it("preserves other filters and pagination on the fallback request", async () => {
+        const client = await connectCoreClient();
+        mockFetch
+          .mockResolvedValueOnce(createMockResponse(createJsonApiResponse([])))
+          .mockResolvedValueOnce(
+            createMockResponse(
+              createJsonApiResponse([
+                { id: "1", type: "organizations", attributes: { name: "Acme Corp" } },
+              ])
+            )
+          );
+
+        await client.callTool({
+          name: "search_organizations",
+          arguments: { name: "acme", organization_type_id: 7, sort: "-name" },
+        });
+
+        const fallbackUrl = decodedUrl(1);
+        expect(fallbackUrl).toContain("filter[organization-type-id]=7");
+        expect(fallbackUrl).toContain("sort=-name");
+        expect(fallbackUrl).not.toContain("filter[name]");
+      });
+
+      it("slices the client-side matches by the caller's requested page", async () => {
+        const client = await connectCoreClient();
+        mockFetch
+          .mockResolvedValueOnce(createMockResponse(createJsonApiResponse([])))
+          .mockResolvedValueOnce(
+            createMockResponse(
+              createJsonApiResponse(
+                Array.from({ length: 3 }, (_, i) => ({
+                  id: String(i + 1),
+                  type: "organizations",
+                  attributes: { name: `Acme Corp ${i + 1}` },
+                }))
+              )
+            )
+          );
+
+        const result = await client.callTool({
+          name: "search_organizations",
+          arguments: { name: "acme", page_size: 2, page_number: 2 },
+        });
+
+        const text = firstText(result);
+        expect(text).toContain("Acme Corp 3");
+        expect(text).not.toContain("Acme Corp 1");
+        expect(text).not.toContain("Acme Corp 2");
+        expect(text).toContain('"totalCount": 3');
+        expect(text).toContain('"currentPage": 2');
+      });
+
+      it("flags a capped fallback listing when more pages exist beyond the cap", async () => {
+        const client = await connectCoreClient();
+        mockFetch.mockResolvedValueOnce(createMockResponse(createJsonApiResponse([])));
+        // 5 pages (NAME_FALLBACK_MAX_PAGES), each reporting a next page.
+        for (let i = 0; i < 5; i++) {
+          mockFetch.mockResolvedValueOnce(
+            createMockResponse(
+              createJsonApiResponse([], {
+                "current-page": i + 1,
+                "next-page": i + 2,
+                "prev-page": i > 0 ? i : null,
+                "total-pages": 10,
+                "total-count": 0,
+              })
+            )
+          );
+        }
+
+        const result = await client.callTool({
+          name: "search_organizations",
+          arguments: { name: "nonexistent" },
+        });
+
+        expect(mockFetch).toHaveBeenCalledTimes(6);
+        expect(firstText(result)).toContain("capped");
+      });
     });
   });
 
@@ -2989,6 +3128,9 @@ describe("Document section tools (round-trip)", () => {
         "https://api.itglue.com/documents/789/relationships/sections/1002"
       );
       expect(init.method).toBe("DELETE");
+      expect(init.body).toBeUndefined();
+      const headers = init.headers as Record<string, string>;
+      expect(headers["Content-Type"]).toBeUndefined();
       expect(isError(result)).toBe(false);
       expect(firstText(result)).toContain("Section 1002 deleted successfully");
     });
@@ -3046,6 +3188,181 @@ describe("Document section tools (round-trip)", () => {
     });
   });
 
+  describe("update_document", () => {
+    it("PATCHes /documents/:id with only the supplied name", async () => {
+      const client = await connectSectionsClient();
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({
+          data: { id: "789", type: "documents", attributes: { name: "Renamed" } },
+        })
+      );
+
+      const result = await client.callTool({
+        name: "update_document",
+        arguments: { document_id: 789, name: "Renamed" },
+      });
+
+      const { url, init } = requestOf();
+      expect(url).toBe("https://api.itglue.com/documents/789");
+      expect(init.method).toBe("PATCH");
+      expect(bodyOf()).toEqual({
+        data: { type: "documents", attributes: { name: "Renamed" } },
+      });
+      expect(isError(result)).toBe(false);
+      expect(firstText(result)).toContain("Renamed");
+    });
+
+    it("coerces a numeric-string document_id and does not forward document_folder_id", async () => {
+      const client = await connectSectionsClient();
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({
+          data: { id: "789", type: "documents", attributes: { name: "Renamed" } },
+        })
+      );
+
+      await client.callTool({
+        name: "update_document",
+        arguments: { document_id: "789", name: "Renamed", document_folder_id: 42 },
+      });
+
+      const { url } = requestOf();
+      expect(url).toBe("https://api.itglue.com/documents/789");
+      expect(bodyOf()).toEqual({
+        data: { type: "documents", attributes: { name: "Renamed" } },
+      });
+    });
+
+    it("does not advertise document_folder_id", async () => {
+      const client = await connectSectionsClient();
+      const { tools } = await client.listTools();
+      const tool = tools.find((t) => t.name === "update_document");
+      const schema = tool?.inputSchema as {
+        properties?: Record<string, unknown>;
+        required?: string[];
+      };
+      expect(schema.properties).not.toHaveProperty("document_folder_id");
+      expect(schema.required).toEqual(["document_id", "name"]);
+      const decimalId = {
+        anyOf: [
+          { type: "integer", minimum: 1 },
+          { type: "string", pattern: "^[1-9][0-9]*$" },
+        ],
+      };
+      expect(schema.properties?.document_id).toEqual({
+        description: "The document ID to rename. A numeric string is accepted.",
+        ...decimalId,
+      });
+      const deleteTool = tools.find((t) => t.name === "delete_document");
+      const deleteSchema = deleteTool?.inputSchema as {
+        properties?: Record<string, unknown>;
+      };
+      expect(deleteSchema.properties?.document_id).toEqual({
+        description: "The document ID to delete. A numeric string is accepted.",
+        ...decimalId,
+      });
+    });
+
+    it("rejects an empty name without calling the API", async () => {
+      const client = await connectSectionsClient();
+      const result = await client.callTool({
+        name: "update_document",
+        arguments: { document_id: 789, name: "   " },
+      });
+
+      expect(isError(result)).toBe(true);
+      expect(firstText(result)).toContain("name must be a non-empty string");
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it("rejects a folder-only update", async () => {
+      const client = await connectSectionsClient();
+      const result = await client.callTool({
+        name: "update_document",
+        arguments: { document_id: 789, document_folder_id: null },
+      });
+
+      expect(isError(result)).toBe(true);
+      expect(firstText(result)).toContain("name must be a non-empty string");
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it("requires document_id", async () => {
+      const client = await connectSectionsClient();
+      const result = await client.callTool({
+        name: "update_document",
+        arguments: { name: "x" },
+      });
+
+      expect(isError(result)).toBe(true);
+      expect(firstText(result)).toContain("document_id is required");
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it("rejects a non-numeric document_id", async () => {
+      const client = await connectSectionsClient();
+      const result = await client.callTool({
+        name: "update_document",
+        arguments: { document_id: "nope", name: "x" },
+      });
+
+      expect(isError(result)).toBe(true);
+      expect(firstText(result)).toContain("document_id is required");
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("delete_document", () => {
+    // IT Glue only supports bulk destroy for documents — pin the verb, path
+    // and body so nobody "fixes" it to the non-existent DELETE /documents/:id.
+    it("DELETEs /documents with the id in a JSON:API body", async () => {
+      const client = await connectSectionsClient();
+      mockFetch.mockResolvedValueOnce(createMockResponse(null, 204));
+
+      const result = await client.callTool({
+        name: "delete_document",
+        arguments: { document_id: 789 },
+      });
+
+      const { url, init } = requestOf();
+      expect(url).toBe("https://api.itglue.com/documents");
+      expect(init.method).toBe("DELETE");
+      const headers = init.headers as Record<string, string>;
+      expect(headers["Content-Type"]).toBe("application/vnd.api+json");
+      expect(headers.Accept).toBe("application/vnd.api+json");
+      expect(bodyOf()).toEqual({
+        data: [{ type: "documents", attributes: { id: 789 } }],
+      });
+      expect(isError(result)).toBe(false);
+      expect(firstText(result)).toContain("Document 789 deleted successfully");
+    });
+
+    it("coerces a numeric-string document_id into the bulk-destroy body", async () => {
+      const client = await connectSectionsClient();
+      mockFetch.mockResolvedValueOnce(createMockResponse(null, 204));
+
+      await client.callTool({
+        name: "delete_document",
+        arguments: { document_id: "789" },
+      });
+
+      expect(bodyOf()).toEqual({
+        data: [{ type: "documents", attributes: { id: 789 } }],
+      });
+    });
+
+    it("requires document_id", async () => {
+      const client = await connectSectionsClient();
+      const result = await client.callTool({
+        name: "delete_document",
+        arguments: {},
+      });
+
+      expect(isError(result)).toBe(true);
+      expect(firstText(result)).toContain("document_id is required");
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+  });
+
   describe("archive_document / unarchive_document", () => {
     // Pins the URL, verb and payload so a refactor can't silently omit
     // `archived` or invent a non-existent /archive sub-endpoint.
@@ -3082,6 +3399,62 @@ describe("Document section tools (round-trip)", () => {
         expect(isError(result)).toBe(true);
         expect(firstText(result)).toContain("document_id is required");
         expect(mockFetch).not.toHaveBeenCalled();
+      }
+    );
+  });
+
+  describe("archive_configuration / unarchive_configuration", () => {
+    // Pins the URL, verb and payload so a refactor can't silently omit
+    // `archived` or invent a non-existent /archive sub-endpoint.
+    it.each([
+      ["archive_configuration", true],
+      ["unarchive_configuration", false],
+    ])("%s PATCHes /configurations/:id with archived=%s", async (tool, archived) => {
+      const client = await connectSectionsClient();
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({
+          data: { id: "789", type: "configurations", attributes: { archived } },
+        })
+      );
+
+      await client.callTool({
+        name: tool as string,
+        arguments: { configuration_id: 789 },
+      });
+
+      const { url, init } = requestOf();
+      expect(url).toBe("https://api.itglue.com/configurations/789");
+      expect(init.method).toBe("PATCH");
+      expect(bodyOf()).toEqual({
+        data: { type: "configurations", attributes: { archived } },
+      });
+    });
+
+    it.each(["archive_configuration", "unarchive_configuration"])(
+      "%s requires configuration_id",
+      async (tool) => {
+        const client = await connectSectionsClient();
+        const result = await client.callTool({ name: tool, arguments: {} });
+
+        expect(isError(result)).toBe(true);
+        expect(firstText(result)).toContain("configuration_id is required");
+        expect(mockFetch).not.toHaveBeenCalled();
+      }
+    );
+
+    it.each(["archive_configuration", "unarchive_configuration"])(
+      "%s surfaces an IT Glue API error instead of reporting success",
+      async (tool) => {
+        const client = await connectSectionsClient();
+        mockFetch.mockResolvedValueOnce(createErrorResponse(404, "Not Found"));
+
+        const result = await client.callTool({
+          name: tool,
+          arguments: { configuration_id: 789 },
+        });
+
+        expect(isError(result)).toBe(true);
+        expect(firstText(result)).toContain("404");
       }
     );
   });
@@ -3292,6 +3665,111 @@ describe("Document folder access (API-key-first, round-trip)", () => {
       expect(isError(result)).toBe(true);
       expect(firstText(result)).toContain("Documents module");
     });
+
+    describe("name fallback (IT Glue's filter[name] is exact-match only)", () => {
+      it("falls back to a client-side substring match when the exact-match query is empty", async () => {
+        const client = await connectClient({ apiKey: "test-api-key" });
+        mockFetch
+          // Primary exact-match query (folder-inclusive null-filter attempt): no hit.
+          .mockResolvedValueOnce(createMockResponse(createJsonApiResponse([])))
+          // Fallback broad listing (its own null-filter attempt): matched client-side.
+          .mockResolvedValueOnce(
+            createMockResponse(
+              createJsonApiResponse([
+                { id: "1", type: "documents", attributes: { name: "Change Management SOP" } },
+                { id: "2", type: "documents", attributes: { name: "Onboarding Checklist" } },
+              ])
+            )
+          );
+
+        const result = await client.callTool({
+          name: "search_documents",
+          arguments: { organization_id: 123, name: "change" },
+        });
+
+        expect(mockFetch).toHaveBeenCalledTimes(2);
+        expect(decodedUrl(0)).toContain("filter[name]=change");
+        expect(decodedUrl(1)).not.toContain("filter[name]");
+
+        const text = firstText(result);
+        expect(text).toContain("client-side, case-insensitive");
+        expect(text).toContain("Change Management SOP");
+        expect(text).not.toContain("Onboarding Checklist");
+      });
+
+      it("does not fall back when the exact-match query already found something", async () => {
+        const client = await connectClient({ apiKey: "test-api-key" });
+        mockFetch.mockResolvedValueOnce(
+          createMockResponse(
+            createJsonApiResponse([
+              { id: "1", type: "documents", attributes: { name: "Change Management SOP" } },
+            ])
+          )
+        );
+
+        const result = await client.callTool({
+          name: "search_documents",
+          arguments: { organization_id: 123, name: "Change Management SOP" },
+        });
+
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+        expect(firstText(result)).not.toContain("client-side");
+      });
+
+      it("keeps the explicit document_folder_id scope on the fallback request", async () => {
+        const client = await connectClient({ apiKey: "test-api-key" });
+        mockFetch
+          .mockResolvedValueOnce(createMockResponse(createJsonApiResponse([])))
+          .mockResolvedValueOnce(
+            createMockResponse(
+              createJsonApiResponse([
+                { id: "1", type: "documents", attributes: { name: "Change Management SOP" } },
+              ])
+            )
+          );
+
+        await client.callTool({
+          name: "search_documents",
+          arguments: { organization_id: 123, document_folder_id: 42, name: "change" },
+        });
+
+        expect(mockFetch).toHaveBeenCalledTimes(2);
+        expect(decodedUrl(0)).toContain("filter[document-folder-id]=42");
+        expect(decodedUrl(1)).toContain("filter[document-folder-id]=42");
+        expect(decodedUrl(1)).not.toContain("filter[name]");
+      });
+
+      it("shows the ROOT-LEVEL scope note when the fallback itself degrades to unfiltered, even though the primary attempt was folder-inclusive", async () => {
+        const client = await connectClient({ apiKey: "test-api-key" });
+        mockFetch
+          // Primary query: folder-inclusive null-filter attempt succeeds, but empty.
+          .mockResolvedValueOnce(createMockResponse(createJsonApiResponse([])))
+          // Fallback page 1 re-negotiates independently and degrades all the
+          // way down to the legacy root-only listing.
+          .mockResolvedValueOnce(createErrorResponse(400, "bad filter"))
+          .mockResolvedValueOnce(createErrorResponse(422, "unprocessable"))
+          .mockResolvedValueOnce(
+            createMockResponse(
+              createJsonApiResponse([
+                { id: "1", type: "documents", attributes: { name: "Change Log" } },
+              ])
+            )
+          );
+
+        const result = await client.callTool({
+          name: "search_documents",
+          arguments: { organization_id: 123, name: "change" },
+        });
+
+        expect(mockFetch).toHaveBeenCalledTimes(4);
+        const text = firstText(result);
+        // The response reflects the fallback's actual (root-only) scope, not
+        // the primary attempt's folder-inclusive one.
+        expect(text).toContain("ROOT-LEVEL");
+        expect(text).not.toContain("includes documents inside folders");
+        expect(text).toContain("Change Log");
+      });
+    });
   });
 
   // search_documents strips bodies to stay small, so the full document body MUST
@@ -3318,16 +3796,18 @@ describe("Document folder access (API-key-first, round-trip)", () => {
         })
       );
 
-      const result = await client.callTool({
+      const result = (await client.callTool({
         name: "get_document",
         arguments: { organization_id: 8250506, id: 20022034 },
-      });
+      })) as { structuredContent?: Record<string, unknown> };
 
-      const text = firstText(result);
-      // The body the list tool omits is present here in full.
-      expect(text).toContain("FULL_BODY_MARKER");
-      expect(text).toContain('"content"');
-      expect(text).toContain("00-1 READ ME");
+      // The body the list tool omits is present here in full, now carried
+      // in structuredContent (SEP-1865 content/structuredContent split) —
+      // the text summary in `content` no longer JSON-dumps the payload.
+      const structured = result.structuredContent as Record<string, unknown>;
+      expect(JSON.stringify(structured)).toContain("FULL_BODY_MARKER");
+      expect(structured.content).toBeDefined();
+      expect(structured.name).toBe("00-1 READ ME");
       // Fetched from the single-document relationship endpoint.
       expect(decodedUrl(0)).toContain(
         "/organizations/8250506/relationships/documents/20022034"
