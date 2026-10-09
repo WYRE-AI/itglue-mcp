@@ -232,43 +232,78 @@ describe("cross-tenant credential isolation (gateway mode)", () => {
     gate.resolve();
     await jwtCall;
 
-    const calls = outboundCalls();
-    expect(calls).toHaveLength(2);
+    // Call order is pinned by the gate: [0] is the JWT tenant's "Acme" query,
+    // [1] is the API-key tenant's "Beta" query. Pair each URL with the
+    // credential that request was supposed to send, so a swap fails.
+    const [jwtOutbound, apiKeyOutbound] = outboundCalls();
 
-    const withJwt = calls.filter((c) => c.authorization !== undefined);
-    const withApiKey = calls.filter((c) => c.apiKey !== undefined);
+    expect(decodeURIComponent(jwtOutbound.url)).toContain(
+      "https://api.itglue.com/organizations"
+    );
+    expect(decodeURIComponent(jwtOutbound.url)).toContain("filter[name]=Acme");
+    expect(jwtOutbound.authorization).toBe("Bearer tenant-a-secret-jwt");
+    expect(jwtOutbound.apiKey).toBeUndefined();
 
-    // Exactly one request may carry the JWT: the tenant that supplied it.
-    expect(withJwt).toHaveLength(1);
-    expect(withJwt[0].authorization).toBe("Bearer tenant-a-secret-jwt");
-
-    // The other request authenticated with its own API key and saw no JWT.
-    expect(withApiKey).toHaveLength(1);
-    expect(withApiKey[0].apiKey).toBe("api-key-tenant-key");
-    expect(withApiKey[0].authorization).toBeUndefined();
+    expect(decodeURIComponent(apiKeyOutbound.url)).toContain(
+      "https://api.itglue.com/organizations"
+    );
+    expect(decodeURIComponent(apiKeyOutbound.url)).toContain("filter[name]=Beta");
+    expect(apiKeyOutbound.apiKey).toBe("api-key-tenant-key");
+    expect(apiKeyOutbound.authorization).toBeUndefined();
   });
 
   it("resolves credentials per server instance, not from a shared module slot", async () => {
     process.env.ITGLUE_API_KEY = "env-fallback-key";
     mockFetch.mockImplementation(async () => jsonApiOk("ok"));
 
-    // Build every server up front, then call them out of construction order.
+    // Build every server up front, then issue each request in a fixed order.
     // A shared "last credentials set wins" slot would serve all three with the
-    // final tenant's key.
-    const tenants = ["alpha", "bravo", "charlie"];
+    // final tenant's key. Distinct query values make each outbound fetch
+    // identifiable, so pairing URL with credential rejects any permutation —
+    // including a swap that would still present the same set of keys.
+    const tenants = [
+      { apiKey: "alpha-key", query: "AlphaCo" },
+      { apiKey: "bravo-key", jwt: "bravo-jwt", query: "BravoCo" },
+      { apiKey: "charlie-key", query: "CharlieCo" },
+    ] as const;
     const clients = await Promise.all(
-      tenants.map((t) => connect({ apiKey: `${t}-key`, region: "us" }))
-    );
-
-    await Promise.all(
-      clients.map((c) =>
-        c.callTool({ name: "search_organizations", arguments: { name: "Acme" } })
+      tenants.map((t) =>
+        connect({
+          apiKey: t.apiKey,
+          jwt: "jwt" in t ? t.jwt : undefined,
+          region: "us",
+        })
       )
     );
 
-    const keysUsed = outboundCalls()
-      .map((c) => c.apiKey)
-      .sort();
-    expect(keysUsed).toEqual(["alpha-key", "bravo-key", "charlie-key"]);
+    for (let i = 0; i < clients.length; i++) {
+      await clients[i].callTool({
+        name: "search_organizations",
+        arguments: { name: tenants[i].query },
+      });
+    }
+
+    const [call0, call1, call2] = outboundCalls();
+
+    expect(decodeURIComponent(call0.url)).toContain(
+      "https://api.itglue.com/organizations"
+    );
+    expect(decodeURIComponent(call0.url)).toContain("filter[name]=AlphaCo");
+    expect(call0.apiKey).toBe("alpha-key");
+    expect(call0.authorization).toBeUndefined();
+
+    expect(decodeURIComponent(call1.url)).toContain(
+      "https://api.itglue.com/organizations"
+    );
+    expect(decodeURIComponent(call1.url)).toContain("filter[name]=BravoCo");
+    expect(call1.authorization).toBe("Bearer bravo-jwt");
+    expect(call1.apiKey).toBeUndefined();
+
+    expect(decodeURIComponent(call2.url)).toContain(
+      "https://api.itglue.com/organizations"
+    );
+    expect(decodeURIComponent(call2.url)).toContain("filter[name]=CharlieCo");
+    expect(call2.apiKey).toBe("charlie-key");
+    expect(call2.authorization).toBeUndefined();
   });
 });
