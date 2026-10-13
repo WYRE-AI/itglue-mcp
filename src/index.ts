@@ -8,13 +8,24 @@
  * The MCP server factory and IT Glue client live in `mcp-server.ts` (which is
  * side-effect free and shared with the Cloudflare Workers entrypoint in
  * `worker.ts`). This file owns the Node-only transports (stdio + Node HTTP).
+ *
+ * HTTP transport refuses to start unless CONDUIT_S2S_SECRET is set to a real
+ * secret. Known placeholders are rejected. MCP_ALLOW_INSECURE_DEV=1 is a
+ * local-only escape hatch for an empty secret: it logs a warning, does not
+ * enforce X-Gateway-S2S, and binds 127.0.0.1. A non-loopback MCP_HTTP_HOST
+ * is refused in that mode. A configured secret honors MCP_HTTP_HOST; when
+ * that variable is unset the process keeps the historical 0.0.0.0 bind.
+ * Gateway mode never falls back to ITGLUE_* env credentials.
+ * /health and /healthz stay unauthenticated and do not read credentials.
+ * stdio does not use S2S auth.
  */
 
-import { createServer, IncomingMessage, ServerResponse } from "node:http";
+import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import {
+  cleanCredential,
   createMcpServer,
   type GatewayCredentials,
   type ITGlueRegion,
@@ -22,7 +33,101 @@ import {
 import { runWithServerRef, bindServerRef } from "./utils/server-ref.js";
 import { verifyS2sHeader, S2S_HEADER } from "./s2s-verify.js";
 
-const S2S_SECRET = process.env.CONDUIT_S2S_SECRET || "";
+/**
+ * Public example values. A copied placeholder must not verify as a real secret.
+ * Compared case-insensitively after trim.
+ */
+const KNOWN_PLACEHOLDER_SECRETS = new Set([
+  "replace-with-a-real-secret",
+  "your-s2s-secret",
+  "your-secret",
+  "changeme",
+  "change-me",
+  "placeholder",
+  "secret",
+  "example",
+  "replace-me",
+  "s2s-secret",
+]);
+
+const LOOPBACK_HOST = "127.0.0.1";
+
+const MISSING_S2S_SECRET_ERROR =
+  "Refusing to start HTTP transport: CONDUIT_S2S_SECRET is empty. " +
+  "Set CONDUIT_S2S_SECRET to the gateway-provisioned secret (openssl rand -hex 32), " +
+  "or set MCP_ALLOW_INSECURE_DEV=1 for local development only.";
+
+const PLACEHOLDER_S2S_SECRET_ERROR =
+  "Refusing to start HTTP transport: CONDUIT_S2S_SECRET is a known placeholder. " +
+  "Generate a secret with `openssl rand -hex 32` and set CONDUIT_S2S_SECRET to that value.";
+
+const INSECURE_DEV_WARNING =
+  "SECURITY WARNING: CONDUIT_S2S_SECRET is empty and MCP_ALLOW_INSECURE_DEV=1. " +
+  "HTTP /mcp is starting with service-to-service authentication DISABLED, bound to 127.0.0.1 only. " +
+  "Local development only; do not expose this port.";
+
+const S2S_UNAUTHORIZED = {
+  error:
+    "Missing or invalid X-Gateway-S2S header: this endpoint only accepts requests signed by the gateway.",
+};
+
+function refuseStart(message: string): never {
+  console.error(message);
+  process.exit(1);
+}
+
+function headerValue(value: string | string[] | undefined): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+/** 127.0.0.1, the rest of 127.0.0.0/8, localhost, and ::1. */
+function isLoopbackBindHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase().replace(/^\[(.+)\]$/, "$1");
+  if (normalized === "localhost" || normalized === "::1") return true;
+  const bare = normalized.startsWith("::ffff:") ? normalized.slice("::ffff:".length) : normalized;
+  const parts = bare.split(".");
+  if (parts.length !== 4) return false;
+  if (parts.some((part) => !/^\d{1,3}$/.test(part) || Number(part) > 255)) return false;
+  return parts[0] === "127";
+}
+
+/**
+ * Fail closed. A known placeholder is never a configured secret, including
+ * when MCP_ALLOW_INSECURE_DEV=1 is also set. Empty is the only case the dev
+ * flag may bypass, and that bypass does not check X-Gateway-S2S.
+ * The secret value is never written to logs.
+ */
+function resolveS2sSecret(env: NodeJS.ProcessEnv = process.env): { secret: string; insecureDev: boolean } {
+  const raw = (env.CONDUIT_S2S_SECRET ?? "").trim();
+  if (raw && KNOWN_PLACEHOLDER_SECRETS.has(raw.toLowerCase())) {
+    refuseStart(PLACEHOLDER_S2S_SECRET_ERROR);
+  }
+  if (raw) return { secret: raw, insecureDev: false };
+  if (env.MCP_ALLOW_INSECURE_DEV === "1") {
+    return { secret: "", insecureDev: true };
+  }
+  refuseStart(MISSING_S2S_SECRET_ERROR);
+}
+
+/**
+ * No real secret: force 127.0.0.1. A non-loopback MCP_HTTP_HOST refuses to
+ * start and is logged. A real secret honors MCP_HTTP_HOST; unset stays
+ * 0.0.0.0 so existing container deploys keep their bind.
+ */
+function resolveBindHost(insecureDev: boolean, env: NodeJS.ProcessEnv = process.env): string {
+  const configured = (env.MCP_HTTP_HOST ?? "").trim();
+  if (!insecureDev) {
+    return configured || "0.0.0.0";
+  }
+  if (configured === "" || isLoopbackBindHost(configured)) {
+    return LOOPBACK_HOST;
+  }
+  refuseStart(
+    `Refusing to start HTTP transport: MCP_ALLOW_INSECURE_DEV=1 without CONDUIT_S2S_SECRET ` +
+      `only listens on ${LOOPBACK_HOST}. MCP_HTTP_HOST=${configured} is not loopback. ` +
+      `Unset MCP_HTTP_HOST or set it to ${LOOPBACK_HOST}.`,
+  );
+}
 
 // Re-export the shared factory + IT Glue client/helpers so existing consumers
 // (and tests) that import from the package entry keep working after the
@@ -73,19 +178,30 @@ async function startStdioTransport(): Promise<void> {
 }
 
 /**
- * Start with HTTP Streamable transport (for Docker/cloud deployment)
- * Supports both env-based and gateway (header-based) credential modes
+ * Start with HTTP Streamable transport (for Docker/cloud deployment).
+ * Supports both env-based and gateway (header-based) credential modes.
+ *
+ * Returns the listening server so tests can close it. Signal handlers are
+ * installed by `main`, not here.
  */
-async function startHttpTransport(): Promise<void> {
+export async function startHttpTransport(): Promise<HttpServer> {
+  const { secret: s2sSecret, insecureDev } = resolveS2sSecret();
   const port = parseInt(process.env.MCP_HTTP_PORT || "8080", 10);
-  const host = process.env.MCP_HTTP_HOST || "0.0.0.0";
+  const host = resolveBindHost(insecureDev);
+  if (insecureDev) {
+    // Logged only after the loopback bind is accepted, so a refused
+    // non-loopback host does not claim the server is starting.
+    console.error(INSECURE_DEV_WARNING);
+  }
   const isGatewayMode = process.env.AUTH_MODE === "gateway";
 
   const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
 
-    // Health endpoint - no auth required
-    if (url.pathname === "/health") {
+    // Health endpoints — shallow, unauthenticated liveness. Must not read
+    // vendor credentials: gateway mode has none at process start, and a
+    // credential-gated probe would 503 forever.
+    if (url.pathname === "/health" || url.pathname === "/healthz") {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(
         JSON.stringify({
@@ -100,13 +216,12 @@ async function startHttpTransport(): Promise<void> {
 
     // MCP endpoint — stateless: fresh server + transport per request
     if (url.pathname === "/mcp") {
-      if (S2S_SECRET && !verifyS2sHeader(req.headers[S2S_HEADER] as string | undefined, S2S_SECRET)) {
+      // Empty s2sSecret is only reachable when MCP_ALLOW_INSECURE_DEV=1;
+      // startup refuses otherwise. A configured secret is always enforced,
+      // before any credential extraction.
+      if (s2sSecret && !verifyS2sHeader(headerValue(req.headers[S2S_HEADER]), s2sSecret)) {
         res.writeHead(401, { "Content-Type": "application/json" });
-        res.end(
-          JSON.stringify({
-            error: "Missing or invalid X-Gateway-S2S header: this endpoint only accepts requests signed by the gateway.",
-          })
-        );
+        res.end(JSON.stringify(S2S_UNAUTHORIZED));
         return;
       }
 
@@ -121,14 +236,15 @@ async function startHttpTransport(): Promise<void> {
         return;
       }
 
-      // In gateway mode, extract credentials from headers; otherwise undefined (env fallback)
+      // In gateway mode, extract credentials from headers. Never fall back
+      // to ITGLUE_* in the process environment — that is not request-scoped.
       let gatewayCredentials: GatewayCredentials | undefined;
       if (isGatewayMode) {
-        const headers = req.headers as Record<string, string | string[] | undefined>;
-        const apiKey =
-          (headers["x-itglue-api-key"] as string) ||
-          (headers["x-api-key"] as string);
-        const jwt = (headers["x-itglue-jwt"] as string) || undefined;
+        const headers = req.headers;
+        const apiKey = cleanCredential(
+          headerValue(headers["x-itglue-api-key"]) ?? headerValue(headers["x-api-key"])
+        );
+        const jwt = cleanCredential(headerValue(headers["x-itglue-jwt"]));
 
         if (!apiKey && !jwt) {
           res.writeHead(401, { "Content-Type": "application/json" });
@@ -142,8 +258,8 @@ async function startHttpTransport(): Promise<void> {
           return;
         }
 
-        const baseUrl = headers["x-itglue-base-url"] as string | undefined;
-        const region = headers["x-itglue-region"] as string | undefined;
+        const baseUrl = headerValue(headers["x-itglue-base-url"]);
+        const region = headerValue(headers["x-itglue-region"]);
 
         gatewayCredentials = {
           apiKey,
@@ -192,11 +308,14 @@ async function startHttpTransport(): Promise<void> {
 
     // 404 for everything else
     res.writeHead(404, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "Not found", endpoints: ["/mcp", "/health"] }));
+    res.end(JSON.stringify({ error: "Not found", endpoints: ["/mcp", "/health", "/healthz"] }));
   });
 
-  await new Promise<void>((resolve) => {
+  await new Promise<void>((resolve, reject) => {
+    const onError = (err: Error) => reject(err);
+    httpServer.once("error", onError);
     httpServer.listen(port, host, () => {
+      httpServer.off("error", onError);
       console.error(`IT Glue MCP server listening on http://${host}:${port}/mcp`);
       console.error(`Health check available at http://${host}:${port}/health`);
       console.error(
@@ -206,17 +325,7 @@ async function startHttpTransport(): Promise<void> {
     });
   });
 
-  // Graceful shutdown
-  const shutdown = async () => {
-    console.error("Shutting down IT Glue MCP server...");
-    await new Promise<void>((resolve, reject) => {
-      httpServer.close((err) => (err ? reject(err) : resolve()));
-    });
-    process.exit(0);
-  };
-
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  return httpServer;
 }
 
 // Start the server
@@ -224,13 +333,25 @@ async function main() {
   const transportType = process.env.MCP_TRANSPORT || "stdio";
 
   if (transportType === "http") {
-    await startHttpTransport();
+    const httpServer = await startHttpTransport();
+    const shutdown = async () => {
+      console.error("Shutting down IT Glue MCP server...");
+      await new Promise<void>((resolve, reject) => {
+        httpServer.close((err) => (err ? reject(err) : resolve()));
+      });
+      process.exit(0);
+    };
+    process.on("SIGINT", shutdown);
+    process.on("SIGTERM", shutdown);
   } else {
     await startStdioTransport();
   }
 }
 
 // Only bootstrap the server when run as a process, not when imported for tests.
-if (process.env.NODE_ENV !== "test") {
-  main().catch(console.error);
+if (process.env.VITEST !== "true" && process.env.NODE_ENV !== "test") {
+  main().catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
 }

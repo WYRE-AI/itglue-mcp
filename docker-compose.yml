@@ -1,4 +1,9 @@
 services:
+  # Gateway mode. The API key and JWT arrive per request on X-ITGlue-API-Key
+  # (or X-API-Key) and X-ITGlue-JWT. Do not set ITGLUE_API_KEY, ITGLUE_JWT,
+  # ITGLUE_REGION, or env_file here — that would put static vendor credentials
+  # in the container. For AUTH_MODE=env, pass those variables on that process
+  # instead (see the README).
   itglue-mcp:
     build:
       context: .
@@ -8,14 +13,13 @@ services:
     container_name: itglue-mcp-server
     restart: unless-stopped
     ports:
-      - "8080:8080"
-    env_file:
-      - .env
+      - "127.0.0.1:8080:8080"
     environment:
-      - ITGLUE_API_KEY=${ITGLUE_API_KEY}
-      - ITGLUE_REGION=${ITGLUE_REGION:-}
       - MCP_TRANSPORT=http
-      - AUTH_MODE=env
+      - MCP_HTTP_PORT=8080
+      - MCP_HTTP_HOST=0.0.0.0
+      - AUTH_MODE=gateway
+      - CONDUIT_S2S_SECRET=${CONDUIT_S2S_SECRET:?set CONDUIT_S2S_SECRET}
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - NODE_ENV=production
     healthcheck:

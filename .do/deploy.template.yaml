@@ -21,6 +21,9 @@ spec:
     - key: ITGLUE_API_KEY
       type: SECRET
       scope: RUN_AND_BUILD_TIME
+    - key: CONDUIT_S2S_SECRET
+      type: SECRET
+      scope: RUN_TIME
     - key: ITGLUE_REGION
       type: SECRET
       scope: RUN_AND_BUILD_TIME

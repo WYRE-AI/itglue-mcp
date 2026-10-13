@@ -43,20 +43,42 @@ docker pull ghcr.io/wyre-ai/itglue-mcp:latest
 
 ## Configuration
 
-The server accepts credentials via environment variables:
+Copy [`.env.example`](.env.example) and set the variables below. Leave `CONDUIT_S2S_SECRET` empty in that file; never commit a real value.
 
 | Variable | Description | Required |
 |----------|-------------|----------|
-| `ITGLUE_API_KEY` | Your IT Glue API key (format: ITG.xxx) | Yes (env mode) |
+| `ITGLUE_API_KEY` | Your IT Glue API key (format: ITG.xxx). Used by stdio and by HTTP when `AUTH_MODE=env`. | Yes (stdio and env mode) |
 | `ITGLUE_JWT` | A user-session JWT used as an optional **fallback** for document-folder operations on tenants whose API key cannot access the Document Folders resource yet. See [JWT fallback for document-folder operations](#jwt-fallback-for-document-folder-operations). | No |
 | `ITGLUE_REGION` | API region: `us`, `eu`, or `au` (default: `us`) | No |
 | `ITGLUE_BASE_URL` | Override the IT Glue API base URL (advanced) | No |
 | `MCP_TRANSPORT` | Transport: `stdio` (local) or `http` (remote). Defaults to `stdio` when run via `npx`/`node`, and to `http` in the Docker image. | No |
 | `MCP_HTTP_PORT` | Port for HTTP transport (default: `8080`) | No |
-| `MCP_HTTP_HOST` | Bind address for HTTP transport (default: `0.0.0.0`) | No |
-| `AUTH_MODE` | `env` (read credentials from environment) or `gateway` (read per-request credentials from HTTP headers). Default: `env`. | No |
+| `MCP_HTTP_HOST` | Bind address when a real `CONDUIT_S2S_SECRET` is set. Unset keeps `0.0.0.0`, the historical container bind. The image and Compose set `0.0.0.0` inside the container. | No |
+| `AUTH_MODE` | `env` (read credentials from environment; image default) or `gateway` (read per-request credentials from HTTP headers; Compose default). Gateway mode never falls back to `ITGLUE_*`. | No |
+| `CONDUIT_S2S_SECRET` | Service-to-service secret for HTTP. The process logs an error and exits non-zero when this is empty or a known placeholder (`changeme`, `secret`, `replace-me`, `your-s2s-secret`, and the other example values). Generate one with `openssl rand -hex 32`. Compose will not start without it. The value is never logged. | Yes for HTTP |
+| `MCP_ALLOW_INSECURE_DEV` | Set to exactly `1` only for local development to start HTTP without `CONDUIT_S2S_SECRET`. The process logs a warning, does not enforce `X-Gateway-S2S`, and binds `127.0.0.1` only. A non-loopback `MCP_HTTP_HOST` refuses to start. A known placeholder secret still refuses to start. | No |
 
-Alternative: When `AUTH_MODE=gateway`, the MCP Gateway injects credentials per request via HTTP headers instead of environment variables. See [Remote Deployment](#remote-deployment-http-streamable).
+`/health` and `/healthz` stay unauthenticated and do not read credentials. The stdio transport does not use `CONDUIT_S2S_SECRET`.
+
+When `AUTH_MODE=gateway`, the MCP Gateway injects credentials per request via HTTP headers instead of environment variables. See [HTTP authentication](#http-authentication) and [Remote Deployment](#remote-deployment-http-streamable).
+
+### HTTP authentication
+
+With `MCP_TRANSPORT=http` and `CONDUIT_S2S_SECRET` set, every `/mcp` request must include `X-Gateway-S2S`. The check is `verifyS2sHeader` in [`src/s2s-verify.ts`](src/s2s-verify.ts): the header value is `t=<unix seconds>,v1=<hex>`, where the hex is HMAC-SHA256 of the literal string `t=<unix seconds>` keyed with `CONDUIT_S2S_SECRET` (64 lowercase hex characters). The timestamp must be within 300 seconds of the server clock. A missing or invalid header is HTTP 401, before vendor credentials are read.
+
+```bash
+TS=$(date +%s)
+SIG=$(printf 't=%s' "$TS" | openssl dgst -sha256 -hmac "$CONDUIT_S2S_SECRET" -hex | awk '{print $NF}')
+curl -sS http://127.0.0.1:8080/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H "X-Gateway-S2S: t=${TS},v1=${SIG}" \
+  -H "X-ITGlue-API-Key: $ITGLUE_API_KEY" \
+  -H "X-ITGlue-Region: us" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+In `AUTH_MODE=gateway`, `/mcp` also requires `X-ITGlue-API-Key` (or `X-API-Key`) or `X-ITGlue-JWT`. Those headers are the only credential source for that request. `AUTH_MODE=env` still requires the signed `X-Gateway-S2S` header, then uses `ITGLUE_API_KEY` and `ITGLUE_JWT` from the environment.
 
 ### JWT fallback for document-folder operations
 
@@ -247,61 +269,76 @@ Or with Docker (local stdio):
 
 ## Remote Deployment (HTTP Streamable)
 
-For server/cloud deployments, run the server with the HTTP Streamable transport. The Docker image already defaults to `MCP_TRANSPORT=http` on port `8080`, exposing two endpoints:
+For server/cloud deployments, run the server with the HTTP Streamable transport. The Docker image already defaults to `MCP_TRANSPORT=http` on port `8080` and listens on `0.0.0.0` inside the container. Startup refuses to run until `CONDUIT_S2S_SECRET` is a real secret. Publish the port on loopback unless a proxy sits in front. Two endpoints:
 
-- `POST /mcp` — MCP Streamable HTTP endpoint (stateless: a fresh server is created per request)
-- `GET /health` — unauthenticated health check
+- `POST /mcp` — MCP Streamable HTTP endpoint (stateless: a fresh server is created per request). Requires a valid `X-Gateway-S2S` header. See [HTTP authentication](#http-authentication).
+- `GET /health` and `GET /healthz` — unauthenticated health checks that do not read credentials
 
 ### Env mode (single tenant)
 
-Credentials come from environment variables. Use this when one API key serves the deployment:
+Credentials come from environment variables after S2S auth succeeds. Use this when one API key serves the deployment. The image defaults to `AUTH_MODE=env`.
 
 ```bash
 docker run -d \
   --name itglue-mcp \
-  -p 8080:8080 \
+  -p 127.0.0.1:8080:8080 \
+  -e CONDUIT_S2S_SECRET="$CONDUIT_S2S_SECRET" \
   -e ITGLUE_API_KEY="ITG.xxxxxxxx" \
   -e ITGLUE_REGION="us" \
   --restart unless-stopped \
   ghcr.io/wyre-ai/itglue-mcp:latest
 
 # Verify
-curl http://localhost:8080/health
+curl http://127.0.0.1:8080/health
 # {"status":"ok","transport":"http","authMode":"env",...}
 ```
 
-Clients connect to `http://<host>:8080/mcp` using the MCP Streamable HTTP transport.
+Clients connect to `http://127.0.0.1:8080/mcp` using the MCP Streamable HTTP transport and must send `X-Gateway-S2S`.
 
 ### Gateway mode (multi-tenant / hosted)
 
-When deployed behind an MCP Gateway (e.g. `mcp.wyre.ai`), set `AUTH_MODE=gateway`. Credentials are then injected per request via HTTP headers rather than environment variables:
+When deployed behind an MCP Gateway (e.g. `mcp.wyre.ai`), set `AUTH_MODE=gateway`. Credentials are then injected per request via HTTP headers rather than environment variables. A request missing both credential headers gets `401` and does not fall back to `ITGLUE_API_KEY` or `ITGLUE_JWT` in the process environment. Compose is this mode: it does not set those variables and does not use `env_file`, so a project `.env` cannot inject static vendor credentials. Compose still requires `CONDUIT_S2S_SECRET`.
 
 ```bash
 docker run -d \
   --name itglue-mcp \
-  -p 8080:8080 \
+  -p 127.0.0.1:8080:8080 \
+  -e CONDUIT_S2S_SECRET="$CONDUIT_S2S_SECRET" \
   -e AUTH_MODE=gateway \
   --restart unless-stopped \
   ghcr.io/wyre-ai/itglue-mcp:latest
 ```
 
-The gateway supplies credentials on each request via these headers:
+```bash
+CONDUIT_S2S_SECRET="$CONDUIT_S2S_SECRET" docker compose up
+```
+
+The gateway supplies credentials and the `X-Gateway-S2S` proof on each request:
 
 | Header | Description | Required |
 |--------|-------------|----------|
+| `X-Gateway-S2S` | `t=<unix seconds>,v1=<hex hmac-sha256>` signed with `CONDUIT_S2S_SECRET`. See [HTTP authentication](#http-authentication). | Yes |
 | `X-ITGlue-API-Key` (or `X-API-Key`) | IT Glue API key | One of API-Key or JWT |
 | `X-ITGlue-JWT` | JWT for elevated-scope operations | One of API-Key or JWT |
 | `X-ITGlue-Region` | API region: `us`, `eu`, or `au` (default: `us`) | No |
 | `X-ITGlue-Base-URL` | Override the IT Glue API base URL | No |
 
-Requests missing both `X-ITGlue-API-Key` and `X-ITGlue-JWT` receive a `401`. The `/health` endpoint reports `"authMode":"gateway"` in this mode.
+Requests missing both `X-ITGlue-API-Key` and `X-ITGlue-JWT` receive a `401`. The `/health` endpoint reports `"authMode":"gateway"` in this mode and does not read those headers.
 
 ### Running without Docker
 
-The same transport works from an installed/built copy by setting `MCP_TRANSPORT=http`:
+The same transport works from an installed/built copy by setting `MCP_TRANSPORT=http`. It refuses to start until `CONDUIT_S2S_SECRET` is set:
 
 ```bash
-MCP_TRANSPORT=http MCP_HTTP_PORT=8080 ITGLUE_API_KEY="ITG.xxxxxxxx" \
+CONDUIT_S2S_SECRET="$CONDUIT_S2S_SECRET" \
+  MCP_TRANSPORT=http MCP_HTTP_PORT=8080 ITGLUE_API_KEY="ITG.xxxxxxxx" \
+  npx @wyre-ai/itglue-mcp
+```
+
+Local HTTP without a secret is development-only. It binds `127.0.0.1` and logs a warning. A non-loopback `MCP_HTTP_HOST` (including `0.0.0.0`) makes startup exit:
+
+```bash
+MCP_TRANSPORT=http MCP_HTTP_HOST=127.0.0.1 MCP_ALLOW_INSECURE_DEV=1 \
   npx @wyre-ai/itglue-mcp
 ```
 
