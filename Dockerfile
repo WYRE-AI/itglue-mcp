@@ -12,6 +12,9 @@ RUN npm ci
 COPY . .
 RUN npm run build
 
+# Drop dev dependencies so they are not copied into the runtime image
+RUN npm prune --omit=dev
+
 FROM node:26-alpine AS runner
 
 LABEL io.modelcontextprotocol.server.name="io.github.WYRE-AI/itglue-mcp"
@@ -28,6 +31,10 @@ RUN addgroup --system --gid 1001 nodejs && \
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/package.json ./
+
+# Security: patch OS packages and drop the npm CLI, which the runtime does not use
+RUN apk upgrade --no-cache && \
+    rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
 USER mcp
 
