@@ -2,7 +2,7 @@
 
 ### Fixed
 
-- A rate-limited request (HTTP 429, or a 503 with `Retry-After`) is now retried up to twice, waiting for the `Retry-After` IT Glue sends (or 1 s then 2 s without one). Waits are capped at 10 s each and 20 s in total, and every attempt gets its own 60 s timeout (requests previously had none). When the wait would be longer, the error keeps the `IT Glue API error (429)` prefix and says how long to wait (`Try again in N s.`, 60 s when IT Glue gives no `Retry-After`).
+- A rate-limited request (HTTP 429, or a 503 with `Retry-After` on a GET) is now retried up to twice, waiting for the `Retry-After` IT Glue sends (or 1 s then 2 s without one). Waits are capped at 10 s each and 20 s in total, and every attempt gets its own 60 s timeout (requests previously had none). When the wait would be longer, the error keeps the `IT Glue API error (429)` prefix and says how long to wait (`Try again in N s.`, 60 s when IT Glue gives no `Retry-After`). A 503 on a POST, PATCH or DELETE is not replayed, because it may already have been applied.
 
 ### Security
 

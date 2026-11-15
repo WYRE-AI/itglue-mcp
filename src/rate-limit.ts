@@ -10,8 +10,13 @@ const logger = {
  *
  * A short wait is retried here so a brief burst does not surface as a tool
  * error. A long one is returned at once, so a tool call is never held for
- * minutes: the caller gets the 429 and its Retry-After. A 503 is retried
- * only when it carries Retry-After.
+ * minutes: the caller gets the 429 and its Retry-After.
+ *
+ * A 429 is retried for every method: IT Glue rejects it before running the
+ * request. A 503 is retried only when it carries Retry-After and the method
+ * is replay-safe (GET/HEAD/OPTIONS). A 503 does not prove a write had no
+ * effect, and IT Glue has no idempotency key, so replaying a POST, PATCH or
+ * DELETE could duplicate it.
  */
 export const RATE_LIMIT_RETRY = {
   /** Retries after the first attempt. */
@@ -62,6 +67,9 @@ export function retryDelayMs(
 
 export const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** Methods a 503 may be replayed for: they cannot create or change anything. */
+const REPLAY_SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
 /**
  * fetch() with the bounded retry above. `makeInit` is called for every
  * attempt so each one gets a fresh timeout signal. Returns the last
@@ -72,11 +80,14 @@ export async function fetchWithRateLimitRetry(
   label: string,
   makeInit: () => RequestInit
 ): Promise<Response> {
-  let res = await fetch(url, makeInit());
+  const init = makeInit();
+  const replaySafe = REPLAY_SAFE_METHODS.has((init.method ?? 'GET').toUpperCase());
+  let res = await fetch(url, init);
   let waitedMs = 0;
   for (let attempt = 0; ; attempt++) {
     const retryAfterMs = parseRetryAfter(res.headers?.get('retry-after'));
-    const retryable = res.status === 429 || (res.status === 503 && retryAfterMs !== undefined);
+    const retryable =
+      res.status === 429 || (res.status === 503 && retryAfterMs !== undefined && replaySafe);
     if (!retryable) return res;
     const delay = retryDelayMs(attempt, retryAfterMs, waitedMs);
     if (delay === undefined) return res;

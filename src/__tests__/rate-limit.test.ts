@@ -147,6 +147,27 @@ describe("ITGlueClient retry on 429", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("does not replay a write on a 503, even with Retry-After (it may have been applied)", async () => {
+    for (const call of [
+      () => client.post("/organizations", { data: {} }),
+      () => client.patch("/organizations/1", { data: {} }),
+      () => client.delete("/organizations/1"),
+    ]) {
+      fetchMock.mockReset();
+      fetchMock.mockResolvedValue(limited("1", 503));
+      await expect(call()).rejects.toThrow(/IT Glue API error \(503\)/);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    }
+
+    // A GET with the same 503 is still retried.
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValueOnce(limited("1", 503)).mockResolvedValueOnce(ok());
+    const pending = client.request("/organizations");
+    await vi.advanceTimersByTimeAsync(1000);
+    await expect(pending).resolves.toMatchObject({ data: [] });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("does not retry other errors", async () => {
     fetchMock.mockResolvedValueOnce(new Response("nope", { status: 500 }));
 
