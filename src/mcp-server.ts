@@ -21,6 +21,7 @@ import { registerPromptHandlers } from "./prompts.js";
 import { registerResourceHandlers } from "./resources.js";
 import { buildDocumentCard, DOCUMENT_CARD_META } from "./card.builder.js";
 import { applyUntrustedContentMarkers } from "./utils/untrusted-content.js";
+import { fetchWithRateLimitRetry, retryAfterSecondsOf } from "./rate-limit.js";
 
 
 // IT Glue region configuration
@@ -293,6 +294,12 @@ function stripDataUriPrefix(content: string): string {
 }
 
 // Simple IT Glue client
+/** Per-attempt timeout for IT Glue API calls. */
+const REQUEST_TIMEOUT_MS = 60_000;
+
+/** Wait to report when a 429 has no Retry-After (IT Glue's window is 3,000 requests per 5 minutes). */
+const DEFAULT_RETRY_AFTER_SECONDS = 60;
+
 export class ITGlueClient {
   private readonly apiKey?: string;
   private readonly jwt?: string;
@@ -365,13 +372,38 @@ export class ITGlueClient {
     return queryString ? `?${queryString}` : "";
   }
 
+  /**
+   * fetch() with the bounded rate-limit retry (see rate-limit.ts) and a fresh
+   * timeout per attempt. Throws "IT Glue API error (<status>): ..." on any
+   * non-2xx; a 429 that outlasts the retry also says "Try again in N s.".
+   */
+  private async send(url: string, init: RequestInit): Promise<Response> {
+    const label = `${init.method ?? "GET"} ${new URL(url).pathname}`;
+    const response = await fetchWithRateLimitRetry(url, label, () => ({
+      ...init,
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    }));
+    if (!response.ok) {
+      const errorBody = await response.text();
+      if (response.status === 429) {
+        const retryAfterSeconds = retryAfterSecondsOf(response) ?? DEFAULT_RETRY_AFTER_SECONDS;
+        throw new Error(
+          `IT Glue API error (429): IT Glue rate-limited the request (HTTP 429). ` +
+            `Try again in ${retryAfterSeconds} s. ${errorBody}`
+        );
+      }
+      throw new Error(`IT Glue API error (${response.status}): ${errorBody}`);
+    }
+    return response;
+  }
+
   async request<T>(
     path: string,
     params: Record<string, unknown> = {}
   ): Promise<{ data: T[]; meta: PaginationMeta }> {
     const url = `${this.baseUrl}${path}${this.buildQueryString(params)}`;
 
-    const response = await fetch(url, {
+    const response = await this.send(url, {
       method: "GET",
       headers: {
         ...this.authHeaders(),
@@ -380,10 +412,6 @@ export class ITGlueClient {
       },
     });
 
-    if (!response.ok) {
-      const errorBody = await response.text();
-      throw new Error(`IT Glue API error (${response.status}): ${errorBody}`);
-    }
 
     const json = (await response.json()) as JsonApiResponse;
 
@@ -415,7 +443,7 @@ export class ITGlueClient {
   async post<T>(path: string, body: Record<string, unknown>): Promise<T> {
     const url = `${this.baseUrl}${path}`;
 
-    const response = await fetch(url, {
+    const response = await this.send(url, {
       method: "POST",
       headers: {
         ...this.authHeaders(),
@@ -425,10 +453,6 @@ export class ITGlueClient {
       body: JSON.stringify(body),
     });
 
-    if (!response.ok) {
-      const errorBody = await response.text();
-      throw new Error(`IT Glue API error (${response.status}): ${errorBody}`);
-    }
 
     const json = (await response.json()) as JsonApiResponse;
 
@@ -444,7 +468,7 @@ export class ITGlueClient {
   async patch<T>(path: string, body: Record<string, unknown> = {}): Promise<T> {
     const url = `${this.baseUrl}${path}`;
 
-    const response = await fetch(url, {
+    const response = await this.send(url, {
       method: "PATCH",
       headers: {
         ...this.authHeaders(),
@@ -454,10 +478,6 @@ export class ITGlueClient {
       body: Object.keys(body).length > 0 ? JSON.stringify(body) : undefined,
     });
 
-    if (!response.ok) {
-      const errorBody = await response.text();
-      throw new Error(`IT Glue API error (${response.status}): ${errorBody}`);
-    }
 
     const json = (await response.json()) as JsonApiResponse;
 
@@ -483,7 +503,7 @@ export class ITGlueClient {
   async delete(path: string, body?: Record<string, unknown>): Promise<void> {
     const url = `${this.baseUrl}${path}`;
 
-    const response = await fetch(url, {
+    await this.send(url, {
       method: "DELETE",
       headers: {
         ...this.authHeaders(),
@@ -493,10 +513,6 @@ export class ITGlueClient {
       body: body ? JSON.stringify(body) : undefined,
     });
 
-    if (!response.ok) {
-      const errorBody = await response.text();
-      throw new Error(`IT Glue API error (${response.status}): ${errorBody}`);
-    }
   }
 }
 
