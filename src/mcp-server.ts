@@ -392,6 +392,12 @@ export class ITGlueClient {
             `Try again in ${retryAfterSeconds} s. ${errorBody}`
         );
       }
+      // A 503 that still carries Retry-After (over the cap, retries used up,
+      // or a write that is never replayed) keeps the requested wait.
+      const retryAfterSeconds = response.status === 503 ? retryAfterSecondsOf(response) : undefined;
+      if (retryAfterSeconds !== undefined) {
+        throw new Error(`IT Glue API error (503): Try again in ${retryAfterSeconds} s. ${errorBody}`);
+      }
       throw new Error(`IT Glue API error (${response.status}): ${errorBody}`);
     }
     return response;

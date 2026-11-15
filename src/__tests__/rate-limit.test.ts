@@ -99,15 +99,17 @@ describe("ITGlueClient retry on 429", () => {
     expect(first.signal).not.toBe(second.signal);
   });
 
-  it("retries writes too (a 429 is rejected before IT Glue processes the request)", async () => {
-    fetchMock.mockResolvedValueOnce(limited("1")).mockResolvedValueOnce(ok({ id: "1", type: "x", attributes: {} }));
-
-    const pending = client.post("/organizations", { data: {} });
-    await vi.advanceTimersByTimeAsync(1000);
-    await pending;
-
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect((fetchMock.mock.calls[1][1] as RequestInit).body).toBe(JSON.stringify({ data: {} }));
+  it("does not replay a write on a 429; the error says how long to wait", async () => {
+    for (const call of [
+      () => client.post("/organizations", { data: {} }),
+      () => client.patch("/organizations/1", { data: {} }),
+      () => client.delete("/organizations/1"),
+    ]) {
+      fetchMock.mockReset();
+      fetchMock.mockResolvedValue(limited("2"));
+      await expect(call()).rejects.toThrow(/IT Glue API error \(429\).*HTTP 429.*Try again in 2 s\./);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    }
   });
 
   it("gives up after maxRetries and reports HTTP 429 with the last Retry-After", async () => {
@@ -155,7 +157,7 @@ describe("ITGlueClient retry on 429", () => {
     ]) {
       fetchMock.mockReset();
       fetchMock.mockResolvedValue(limited("1", 503));
-      await expect(call()).rejects.toThrow(/IT Glue API error \(503\)/);
+      await expect(call()).rejects.toThrow(/IT Glue API error \(503\): Try again in 1 s\./);
       expect(fetchMock).toHaveBeenCalledTimes(1);
     }
 
@@ -166,6 +168,24 @@ describe("ITGlueClient retry on 429", () => {
     await vi.advanceTimersByTimeAsync(1000);
     await expect(pending).resolves.toMatchObject({ data: [] });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the Retry-After of a 503 it stops retrying, and leaves a bare 503 unchanged", async () => {
+    fetchMock.mockResolvedValueOnce(limited("30", 503));
+    await expect(client.request("/organizations")).rejects.toThrow(/^IT Glue API error \(503\): Try again in 30 s\./);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    fetchMock.mockReset();
+    fetchMock.mockImplementation(async () => limited("2", 503));
+    const pending = client.request("/organizations");
+    const assertion = expect(pending).rejects.toThrow(/IT Glue API error \(503\): Try again in 2 s\./);
+    await vi.advanceTimersByTimeAsync(10_000);
+    await assertion;
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValueOnce(new Response("down", { status: 503 }));
+    await expect(client.request("/organizations")).rejects.toThrow(/^IT Glue API error \(503\): down$/);
   });
 
   it("does not retry other errors", async () => {

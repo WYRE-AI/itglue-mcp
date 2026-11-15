@@ -12,11 +12,12 @@ const logger = {
  * error. A long one is returned at once, so a tool call is never held for
  * minutes: the caller gets the 429 and its Retry-After.
  *
- * A 429 is retried for every method: IT Glue rejects it before running the
- * request. A 503 is retried only when it carries Retry-After and the method
- * is replay-safe (GET/HEAD/OPTIONS). A 503 does not prove a write had no
- * effect, and IT Glue has no idempotency key, so replaying a POST, PATCH or
- * DELETE could duplicate it.
+ * Only replay-safe methods (GET/HEAD/OPTIONS) are retried, on a 429 or on a
+ * 503 that carries Retry-After (RFC 9110 9.2.2). IT Glue does not document
+ * that a rate-limited write was rejected before it ran, a 503 does not prove
+ * a write had no effect, and IT Glue has no idempotency key. So a POST,
+ * PATCH or DELETE is never replayed here: it fails at once and the error
+ * says how long to wait.
  */
 export const RATE_LIMIT_RETRY = {
   /** Retries after the first attempt. */
@@ -67,7 +68,7 @@ export function retryDelayMs(
 
 export const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Methods a 503 may be replayed for: they cannot create or change anything. */
+/** Methods that may be replayed: they cannot create or change anything. */
 const REPLAY_SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
 /**
@@ -87,7 +88,7 @@ export async function fetchWithRateLimitRetry(
   for (let attempt = 0; ; attempt++) {
     const retryAfterMs = parseRetryAfter(res.headers?.get('retry-after'));
     const retryable =
-      res.status === 429 || (res.status === 503 && retryAfterMs !== undefined && replaySafe);
+      replaySafe && (res.status === 429 || (res.status === 503 && retryAfterMs !== undefined));
     if (!retryable) return res;
     const delay = retryDelayMs(attempt, retryAfterMs, waitedMs);
     if (delay === undefined) return res;
