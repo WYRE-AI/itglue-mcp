@@ -910,6 +910,23 @@ export interface NameFallbackResult {
 }
 
 /**
+ * True when a `filter[name]` query came back with records that do not match
+ * the name - IT Glue silently ignored the filter. Observed for documents: with
+ * `filter[document_folder_id]=null` (the folder-inclusive listing) IT Glue
+ * returns every document in the organization regardless of `filter[name]`.
+ * An honoured exact-match filter only returns records whose name equals the
+ * filter, so any record whose name does not contain it (case-insensitively)
+ * proves the filter was dropped. Records without a string name are ignored.
+ */
+export function nameFilterWasIgnored(items: unknown[], name: string): boolean {
+  const needle = name.toLowerCase();
+  return items.some((item) => {
+    const itemName = (item as { name?: unknown } | null)?.name;
+    return typeof itemName === "string" && !itemName.toLowerCase().includes(needle);
+  });
+}
+
+/**
  * Client-side "contains" search for a resource whose IT Glue `filter[name]`
  * is exact-match only.
  *
@@ -925,7 +942,8 @@ export interface NameFallbackResult {
  * NAME_FALLBACK_MAX_PAGES is reached (`capped: true` in the latter case — the
  * result may be incomplete). The caller's requested page is then sliced out
  * of the accumulated matches, so pagination behaves the same as any other
- * search result from the tool's perspective.
+ * search result from the tool's perspective. Callers also use it when
+ * {@link nameFilterWasIgnored} shows IT Glue dropped the name filter.
  */
 export async function searchByNameWithFallback(
   fetchPage: (page: {
@@ -2598,9 +2616,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           // The query above is the cheap, correct path whenever the caller
           // already has the exact name; only when it comes back empty do we
           // fall back to a broader listing matched client-side as a
-          // substring (see searchByNameWithFallback).
+          // substring (see searchByNameWithFallback). It also runs when IT
+          // Glue ignored the filter: with filter[document_folder_id]=null it
+          // returns every document regardless of filter[name], which used to
+          // be passed back as if it were the search result.
           let nameNote: string | null = null;
-          if (docName && result.data.length === 0) {
+          if (docName && (result.data.length === 0 || nameFilterWasIgnored(result.data, docName))) {
             // Each fallback page re-negotiates the folder filter independently
             // (see requestDocumentsWithFolderDefault) — capture every page's
             // attempt so the scope note below describes what actually

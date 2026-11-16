@@ -3533,6 +3533,56 @@ describe("Document folder access (API-key-first, round-trip)", () => {
       expect(text).toContain('"documentFolderId": 42');
     });
 
+    it("filters by name client-side when IT Glue ignores filter[name] alongside the folder filter", async () => {
+      const client = await connectClient({ apiKey: "test-api-key" });
+      // Observed against a live tenant: with filter[document_folder_id]=null,
+      // IT Glue returns every document in the organization and ignores
+      // filter[name]. That used to be returned as if it were the search result.
+      const everything = createJsonApiResponse([
+        { id: "1", type: "documents", attributes: { name: "Teams Call reporting", "document-folder-id": 42 } },
+        { id: "2", type: "documents", attributes: { name: "Veeam DR runbook", "document-folder-id": 7 } },
+        { id: "3", type: "documents", attributes: { name: "debug.log" } },
+      ]);
+      mockFetch
+        .mockResolvedValueOnce(createMockResponse(everything))
+        .mockResolvedValueOnce(createMockResponse(everything));
+
+      const result = await client.callTool({
+        name: "search_documents",
+        arguments: { organization_id: 123, name: "veeam" },
+      });
+
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect(decodedUrl(0)).toContain("filter[name]=veeam");
+      // The fallback listing drops the ignored name filter and stays folder-inclusive.
+      expect(decodedUrl(1)).not.toContain("filter[name]");
+      expect(decodedUrl(1)).toContain("filter[document_folder_id]=null");
+      const text = firstText(result);
+      expect(text).toContain("client-side, case-insensitive");
+      expect(text).toContain("Veeam DR runbook");
+      expect(text).not.toContain("Teams Call reporting");
+      expect(text).not.toContain("debug.log");
+    });
+
+    it("keeps an honoured exact-match document result without a fallback request", async () => {
+      const client = await connectClient({ apiKey: "test-api-key" });
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse(
+          createJsonApiResponse([
+            { id: "2", type: "documents", attributes: { name: "Veeam DR runbook" } },
+          ])
+        )
+      );
+
+      const result = await client.callTool({
+        name: "search_documents",
+        arguments: { organization_id: 123, name: "Veeam DR runbook" },
+      });
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(firstText(result)).not.toContain("client-side");
+    });
+
     it("omits heavy document body content from list results (metadata only)", async () => {
       const client = await connectClient({ apiKey: "test-api-key" });
       // IT Glue's documents list endpoint embeds each document's full sectioned
