@@ -3624,6 +3624,29 @@ describe("Document folder access (API-key-first, round-trip)", () => {
       expect(text).toContain('"currentPage": 2');
     });
 
+    it("never passes a non-matching document through when only page 1 happens to match", async () => {
+      // Unfiltered listing [Veeam A, Alpha], page_size 1, page 2. Page 1 holds
+      // only a name containing "veeam", but not one EQUAL to it, and page 2's
+      // "Alpha" is a definite non-match: the fallback must run and exclude it.
+      const client = await connectClient({ apiKey: "test-api-key" });
+      const veeamA = { id: "1", type: "documents", attributes: { name: "Veeam A" } };
+      const alpha = { id: "2", type: "documents", attributes: { name: "Alpha" } };
+      mockFetch
+        .mockResolvedValueOnce(createMockResponse(createJsonApiResponse([alpha])))
+        .mockResolvedValueOnce(createMockResponse(createJsonApiResponse([veeamA])))
+        .mockResolvedValueOnce(createMockResponse(createJsonApiResponse([veeamA, alpha])));
+
+      const result = await client.callTool({
+        name: "search_documents",
+        arguments: { organization_id: 123, name: "veeam", page_size: 1, page_number: 2 },
+      });
+
+      const text = firstText(result);
+      expect(text).toContain("client-side, case-insensitive");
+      expect(text).not.toContain("Alpha");
+      expect(text).toContain('"totalCount": 1');
+    });
+
     it("keeps IT Glue's own paging on later pages when page 1 honoured the exact match", async () => {
       const client = await connectClient({ apiKey: "test-api-key" });
       const exact = { id: "9", type: "documents", attributes: { name: "Veeam DR runbook" } };
