@@ -2620,8 +2620,35 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           // Glue ignored the filter: with filter[document_folder_id]=null it
           // returns every document regardless of filter[name], which used to
           // be passed back as if it were the search result.
+          //
+          // The choice between IT Glue's own paging and the fallback's paging
+          // is made from PAGE 1 for every page of the same search, so paging
+          // through results never mixes the two (a later unfiltered vendor page
+          // can happen to contain only matches, which would otherwise switch
+          // domains mid-search and repeat or skip documents). Page 1 decides
+          // from its own response (one request for an honoured exact match);
+          // a later page fetches page 1 once more to make the same decision.
           let nameNote: string | null = null;
-          if (docName && (result.data.length === 0 || nameFilterWasIgnored(result.data, docName))) {
+          let useNameFallback = false;
+          if (docName) {
+            let decider = result.data;
+            if (page.number > 1) {
+              const probeParams = { ...params, page: { size: page.size, number: 1 } };
+              const probe = args?.document_folder_id
+                ? await client.request<unknown>(
+                    `/organizations/${args.organization_id}/relationships/documents`,
+                    probeParams
+                  )
+                : (await requestDocumentsWithFolderDefault(
+                    client,
+                    args.organization_id as number | string,
+                    probeParams
+                  )).result;
+              decider = probe.data;
+            }
+            useNameFallback = decider.length === 0 || nameFilterWasIgnored(decider, docName);
+          }
+          if (useNameFallback && docName) {
             // Each fallback page re-negotiates the folder filter independently
             // (see requestDocumentsWithFolderDefault) — capture every page's
             // attempt so the scope note below describes what actually

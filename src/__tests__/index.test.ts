@@ -3583,6 +3583,65 @@ describe("Document folder access (API-key-first, round-trip)", () => {
       expect(firstText(result)).not.toContain("client-side");
     });
 
+    it("keeps the fallback's pagination on later pages of an ignored-filter search", async () => {
+      // Listing [Alpha, Veeam A, Veeam B], page_size 1. IT Glue ignores
+      // filter[name], so its unfiltered page 2 is "Veeam A" - which happens to
+      // match. Page 2 must still come from the fallback: "Veeam B", with the
+      // fallback's totals, not a repeat of "Veeam A".
+      const client = await connectClient({ apiKey: "test-api-key" });
+      const doc = (id: string, name: string) => ({ id, type: "documents", attributes: { name } });
+      const all = [doc("1", "Alpha"), doc("2", "Veeam A"), doc("3", "Veeam B")];
+      const unfilteredPage = (n: number) =>
+        createJsonApiResponse([all[n - 1]], {
+          "current-page": n,
+          "next-page": n < 3 ? n + 1 : null,
+          "prev-page": n > 1 ? n - 1 : null,
+          "total-pages": 3,
+          "total-count": 3,
+        });
+      mockFetch
+        // Requested page 2: the vendor ignores the name filter -> "Veeam A".
+        .mockResolvedValueOnce(createMockResponse(unfilteredPage(2)))
+        // Page-1 probe decides the domain: "Alpha" proves the filter was ignored.
+        .mockResolvedValueOnce(createMockResponse(unfilteredPage(1)))
+        // Fallback listing (page size 1000): everything, one page.
+        .mockResolvedValueOnce(createMockResponse(createJsonApiResponse(all)));
+
+      const result = await client.callTool({
+        name: "search_documents",
+        arguments: { organization_id: 123, name: "veeam", page_size: 1, page_number: 2 },
+      });
+
+      expect(mockFetch).toHaveBeenCalledTimes(3);
+      expect(decodedUrl(1)).toContain("page[number]=1");
+      const text = firstText(result);
+      expect(text).toContain("client-side, case-insensitive");
+      expect(text).toContain("Veeam B");
+      expect(text).not.toContain("Veeam A");
+      // Metadata is the fallback's (2 matches), not the vendor's unfiltered 3.
+      expect(text).toContain('"totalCount": 2');
+      expect(text).toContain('"totalPages": 2');
+      expect(text).toContain('"currentPage": 2');
+    });
+
+    it("keeps IT Glue's own paging on later pages when page 1 honoured the exact match", async () => {
+      const client = await connectClient({ apiKey: "test-api-key" });
+      const exact = { id: "9", type: "documents", attributes: { name: "Veeam DR runbook" } };
+      mockFetch
+        // Requested page 2 of an honoured exact match: empty (past the end).
+        .mockResolvedValueOnce(createMockResponse(createJsonApiResponse([])))
+        // Page-1 probe: the filter was honoured.
+        .mockResolvedValueOnce(createMockResponse(createJsonApiResponse([exact])));
+
+      const result = await client.callTool({
+        name: "search_documents",
+        arguments: { organization_id: 123, name: "Veeam DR runbook", page_number: 2 },
+      });
+
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect(firstText(result)).not.toContain("client-side");
+    });
+
     it("omits heavy document body content from list results (metadata only)", async () => {
       const client = await connectClient({ apiKey: "test-api-key" });
       // IT Glue's documents list endpoint embeds each document's full sectioned
