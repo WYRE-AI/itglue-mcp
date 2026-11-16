@@ -21,7 +21,7 @@ import { registerPromptHandlers } from "./prompts.js";
 import { registerResourceHandlers } from "./resources.js";
 import { buildDocumentCard, DOCUMENT_CARD_META } from "./card.builder.js";
 import { applyUntrustedContentMarkers } from "./utils/untrusted-content.js";
-import { fetchWithRateLimitRetry, retryAfterSecondsOf } from "./rate-limit.js";
+import { ITGlueRateLimitError, fetchWithRateLimitRetry, retryAfterSecondsOf } from "./rate-limit.js";
 
 
 // IT Glue region configuration
@@ -387,9 +387,10 @@ export class ITGlueClient {
       const errorBody = await response.text();
       if (response.status === 429) {
         const retryAfterSeconds = retryAfterSecondsOf(response) ?? DEFAULT_RETRY_AFTER_SECONDS;
-        throw new Error(
+        throw new ITGlueRateLimitError(
           `IT Glue API error (429): IT Glue rate-limited the request (HTTP 429). ` +
-            `Try again in ${retryAfterSeconds} s. ${errorBody}`
+            `Try again in ${retryAfterSeconds} s. ${errorBody}`,
+          retryAfterSeconds
         );
       }
       // A 503 that still carries Retry-After (over the cap, retries used up,
