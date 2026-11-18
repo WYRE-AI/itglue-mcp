@@ -1,5 +1,16 @@
 ## [Unreleased]
 
+### Fixed
+
+- **`search_documents` returned every document for a name search.** With the folder-inclusive
+  listing (`filter[document_folder_id]=null`), IT Glue ignores `filter[name]` and returns every
+  document in the organization. The handler only fell back to its client-side "contains"
+  match when the response was empty, so the whole unfiltered list was returned as the search
+  result. It now also falls back when any returned document name does not contain the requested
+  name (`nameFilterWasIgnored`). An honoured exact match still returns without a second request.
+  The choice between IT Glue's paging and the fallback's paging is made from page 1 for every
+  page of a search, so paging never mixes the two (a later page fetches page 1 once more to decide).
+
 ### Security
 
 - **Cross-tenant elicitation/confirmation misroute (gateway mode).** The
