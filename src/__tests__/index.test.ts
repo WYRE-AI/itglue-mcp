@@ -349,7 +349,7 @@ describe("Tool Definitions", () => {
     { name: "search_passwords", requiredFields: [] as string[], properties: ["organization_id", "name", "password_category_id", "url", "username", "page_size", "page_number", "sort"] },
     { name: "get_password", requiredFields: ["id"], properties: ["id", "show_password"] },
     { name: "search_documents", requiredFields: ["organization_id"] as string[], properties: ["organization_id", "name", "page_size", "page_number", "sort"] },
-    { name: "get_document", requiredFields: ["organization_id", "id"], properties: ["organization_id", "id"] },
+    { name: "get_document", requiredFields: ["id"], properties: ["organization_id", "id"] },
     { name: "list_document_folders", requiredFields: ["organization_id"], properties: ["organization_id", "name", "page_size", "page_number"] },
     { name: "create_document", requiredFields: ["organization_id", "name"], properties: ["organization_id", "name", "content"] },
     { name: "update_document", requiredFields: ["document_id", "name"], properties: ["document_id", "name"] },
@@ -3944,6 +3944,73 @@ describe("Document folder access (API-key-first, round-trip)", () => {
       expect(decodedUrl(0)).toContain(
         "/organizations/8250506/relationships/documents/20022034"
       );
+    });
+
+    // Callers that only hold a document ID (the document write tools take
+    // document_id alone) can still read it. IT Glue's GET /documents/:id returns the same
+    // record as the nested route, organization included.
+    it("reads by ID alone from GET /documents/:id when organization_id is left out", async () => {
+      const client = await connectClient({ apiKey: "test-api-key" });
+      mockFetch.mockResolvedValueOnce(
+        createMockResponse({
+          data: {
+            id: "700001",
+            type: "documents",
+            attributes: {
+              name: "Example Runbook",
+              "organization-id": 4100,
+              "organization-name": "Example Org",
+              "document-folder-id": 52,
+              "published-at": "2026-01-02T03:04:05.000Z",
+              content: [{ "resource-type": "Document::Text", content: "<p>Body text</p>" }],
+            },
+          },
+          meta: {},
+        })
+      );
+
+      const result = (await client.callTool({
+        name: "get_document",
+        arguments: { id: "700001" },
+      })) as { structuredContent?: Record<string, unknown> };
+
+      expect(isError(result)).toBe(false);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      const url = decodedUrl(0);
+      expect(url).toMatch(/\/documents\/700001(\?|$)/);
+      expect(url).not.toContain("/organizations/");
+      const structured = result.structuredContent as Record<string, unknown>;
+      expect(structured.name).toBe("Example Runbook");
+      expect(structured.organizationId).toBe(4100);
+      expect(structured.organizationName).toBe("Example Org");
+      expect(structured.documentFolderId).toBe(52);
+      expect(structured.publishedAt).toBe("2026-01-02T03:04:05.000Z");
+      expect(Array.isArray(structured.content)).toBe(true);
+      const card = structured._card as { organization?: string; sections?: unknown[] };
+      expect(card.organization).toBe("Example Org");
+      expect(card.sections).toEqual([{ text: "Body text" }]);
+    });
+
+    it("only requires id in its input schema", async () => {
+      const client = await connectClient({ apiKey: "test-api-key" });
+      const { tools } = await client.listTools();
+      const tool = tools.find((t) => t.name === "get_document");
+      expect(tool?.inputSchema.required).toEqual(["id"]);
+      expect(tool?.inputSchema.properties).toHaveProperty("organization_id");
+    });
+
+    it.each([
+      [{}, "id"],
+      [{ id: "5/../12" }, "id"],
+      [{ id: "0" }, "id"],
+      [{ id: "700001", organization_id: "4100/../9" }, "organization_id"],
+      [{ id: "700001", organization_id: -1 }, "organization_id"],
+    ])("refuses %j before sending a request", async (args, field) => {
+      const client = await connectClient({ apiKey: "test-api-key" });
+      const result = await client.callTool({ name: "get_document", arguments: args });
+      expect(isError(result)).toBe(true);
+      expect(firstText(result)).toContain(field);
+      expect(mockFetch).not.toHaveBeenCalled();
     });
   });
 

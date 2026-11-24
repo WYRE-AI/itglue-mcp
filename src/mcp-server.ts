@@ -1588,21 +1588,23 @@ export function createMcpServer(credentialOverrides?: GatewayCredentials): Serve
       },
       {
         name: "get_document",
-        description: "Get a specific document by ID from IT Glue",
+        description:
+          "Get a specific document by ID from IT Glue, including its sections, its organization (organizationId and organizationName), folder and published dates. organization_id is optional: without it the document is read by ID alone (GET /documents/:id); with it, through the organization (GET /organizations/:organization_id/relationships/documents/:id). Both return the same fields.",
         _meta: DOCUMENT_CARD_META,
         inputSchema: {
           type: "object",
           properties: {
             organization_id: {
               type: "number",
-              description: "Organization ID that owns the document",
+              description:
+                "Optional. Organization ID that owns the document. Leave it out when only the document ID is known.",
             },
             id: {
               type: "string",
               description: "The document ID",
             },
           },
-          required: ["organization_id", "id"],
+          required: ["id"],
         },
       },
       {
@@ -2725,15 +2727,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "get_document": {
-        if (!args?.organization_id || !args?.id) {
+        // organization_id is optional: IT Glue serves the same document
+        // (sections, organization-id and organization-name included) at
+        // GET /documents/:id, and only the nested route needs the organization.
+        // Both IDs go into the URL path, so each must be a positive integer.
+        const documentId = positiveInteger(args?.id);
+        if (documentId === undefined) {
           return {
-            content: [{ type: "text", text: "Error: organization_id and id are required" }],
+            content: [{ type: "text", text: "Error: id is required and must be a positive integer" }],
             isError: true,
           };
         }
-        const doc = await client.get<Record<string, unknown>>(
-          `/organizations/${args.organization_id}/relationships/documents/${args.id}`
-        );
+        let docPath = `/documents/${documentId}`;
+        if (args?.organization_id !== undefined && args?.organization_id !== null) {
+          const organizationId = positiveInteger(args.organization_id);
+          if (organizationId === undefined) {
+            return {
+              content: [{ type: "text", text: "Error: organization_id must be a positive integer when given" }],
+              isError: true,
+            };
+          }
+          docPath = `/organizations/${organizationId}/relationships${docPath}`;
+        }
+        const doc = await client.get<Record<string, unknown>>(docPath);
         const payload: Record<string, unknown> = { ...doc };
 
         // MCP Apps: attach the normalized card payload the ui:// document
@@ -2746,7 +2762,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // summary; the full JSON payload (including _card) lives in
         // structuredContent so it isn't duplicated into the LLM context.
         const docName =
-          typeof payload.name === "string" ? payload.name : `document ${args.id}`;
+          typeof payload.name === "string" ? payload.name : `document ${documentId}`;
         return {
           content: [{ type: "text", text: `Retrieved document "${docName}".` }],
           structuredContent: payload,
