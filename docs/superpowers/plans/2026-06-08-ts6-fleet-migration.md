@@ -163,7 +163,7 @@ Add compilerOptions.types: [node] so Node/web globals resolve under TS6
 drop the Dependabot typescript-major ignore. Verified: build, 146 tests,
 lint, typecheck. First canary of the fleet TS6 migration."
 git push -u origin chore/ts6-migration
-gh pr create --repo wyre-technology/itglue-mcp --base main --head chore/ts6-migration \
+gh pr create --repo WYRE-AI/itglue-mcp --base main --head chore/ts6-migration \
   --title "build(deps-dev): adopt TypeScript 6 (canary 1)" \
   --body "First TS6 fleet-migration canary. Adds tsconfig types:[node] (restores Node/web globals dropped by TS6), bumps typescript ^6.0.3, removes the TS-major Dependabot ignore. Carries the migration spec + plan. Verified build/test/lint/typecheck locally."
 ```
@@ -180,7 +180,7 @@ Expected: PR created. Wait for CI green (build, tests Node 20/22, `assert`) befo
 
 Run:
 ```bash
-cd /tmp && rm -rf huntress-mcp && gh repo clone wyre-technology/huntress-mcp && cd huntress-mcp
+cd /tmp && rm -rf huntress-mcp && gh repo clone WYRE-AI/huntress-mcp && cd huntress-mcp
 git checkout -b chore/ts6-migration
 npm ci >/dev/null 2>&1 && echo "installed"
 ```
@@ -217,7 +217,7 @@ Add compilerOptions.types: [node] for TS6 global resolution; bump
 typescript ^6.0.3. Second canary (bundler tsconfig dialect) of the
 fleet TS6 migration. Verified build + tests."
 git push -u origin chore/ts6-migration
-gh pr create --repo wyre-technology/huntress-mcp --base main --head chore/ts6-migration \
+gh pr create --repo WYRE-AI/huntress-mcp --base main --head chore/ts6-migration \
   --title "build(deps-dev): adopt TypeScript 6 (canary 2, bundler dialect)" \
   --body "Second TS6 fleet-migration canary, proving the fix on the bundler tsconfig dialect. Adds types:[node], bumps typescript ^6.0.3. Verified build + tests locally."
 ```
