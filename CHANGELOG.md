@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+### Changed
+
+- **`get_document` no longer needs `organization_id`.** Without it the document is read with
+  IT Glue's `GET /documents/:id`, which returns the same fields as the nested route (name,
+  `organizationId` and `organizationName`, folder, sections and published dates), so a caller
+  that has only a document ID can show what it is and whose it is. With `organization_id` the
+  nested `/organizations/:organization_id/relationships/documents/:id` route is still used.
+  Both IDs must be positive integers; anything else is refused before a request is sent.
+
 ### Fixed
 
 - **The HTTP transport no longer exits on a malformed request (WYREAI-741).** The request
