@@ -26,6 +26,17 @@
   The choice between IT Glue's paging and the fallback's paging is made from page 1 for every
   page of a search, so paging never mixes the two (a later page fetches page 1 once more to decide).
 
+- **Rate-limited requests are retried once and say how long to wait.** A read (GET, HEAD or
+  OPTIONS) that gets HTTP 429, or a 503 with `Retry-After`, is retried once when IT Glue sends a
+  `Retry-After` of at most 10 s, after waiting that long. With no `Retry-After`, or a longer one,
+  the error is returned at once (no invented backoff). A 429 error keeps the
+  `IT Glue API error (429)` prefix and says `Try again in N s.` (60 s when IT Glue gives no
+  `Retry-After`), and `ITGlueRateLimitError.retryAfterSeconds` holds the same N (at least 1).
+  A 503 that carries `Retry-After` keeps it in the error (`IT Glue API error (503): Try again
+  in N s.`). Writes (POST, PATCH, DELETE) are never replayed, because IT Glue does not document
+  that a rate-limited or unavailable write had no effect: they fail at once with the wait in the
+  error. Every attempt now has its own 60 s timeout (requests previously had none).
+
 ### Security
 
 - **Cross-tenant elicitation/confirmation misroute (gateway mode).** The
